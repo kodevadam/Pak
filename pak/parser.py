@@ -525,8 +525,12 @@ class Parser:
                 op = self.advance().value
                 right = self.parse_assign()
                 return ast.Assign(target=left, value=right, op=op, line=line, col=col)
-        for op_tt, op_str in [(TT.PLUS_EQ, '+='), (TT.MINUS_EQ, '-='),
-                               (TT.STAR_EQ, '*='), (TT.SLASH_EQ, '/=')]:
+        for op_tt, op_str in [
+            (TT.PLUS_EQ, '+='), (TT.MINUS_EQ, '-='),
+            (TT.STAR_EQ, '*='), (TT.SLASH_EQ, '/='),
+            (TT.SHL_EQ, '<<='), (TT.SHR_EQ, '>>='),
+            (TT.AMP_EQ, '&='), (TT.PIPE_EQ, '|='), (TT.CARET_EQ, '^='),
+        ]:
             if self.match(op_tt):
                 right = self.parse_assign()
                 return ast.Assign(target=left, value=right, op=op_str, line=line, col=col)
@@ -549,18 +553,45 @@ class Parser:
         line, col = self.loc()
         left = self.parse_and()
         while self.check(TT.OR):
-            op = self.advance().value
+            self.advance()
             right = self.parse_and()
             left = ast.BinaryOp(op='||', left=left, right=right, line=line, col=col)
         return left
 
     def parse_and(self) -> Any:
         line, col = self.loc()
-        left = self.parse_eq()
+        left = self.parse_bitor()
         while self.check(TT.AND):
-            op = self.advance().value
-            right = self.parse_eq()
+            self.advance()
+            right = self.parse_bitor()
             left = ast.BinaryOp(op='&&', left=left, right=right, line=line, col=col)
+        return left
+
+    def parse_bitor(self) -> Any:
+        line, col = self.loc()
+        left = self.parse_bitxor()
+        while self.check(TT.PIPE):
+            self.advance()
+            right = self.parse_bitxor()
+            left = ast.BinaryOp(op='|', left=left, right=right, line=line, col=col)
+        return left
+
+    def parse_bitxor(self) -> Any:
+        line, col = self.loc()
+        left = self.parse_bitand()
+        while self.check(TT.CARET):
+            self.advance()
+            right = self.parse_bitand()
+            left = ast.BinaryOp(op='^', left=left, right=right, line=line, col=col)
+        return left
+
+    def parse_bitand(self) -> Any:
+        line, col = self.loc()
+        left = self.parse_eq()
+        while self.check(TT.AMP):
+            self.advance()
+            right = self.parse_eq()
+            left = ast.BinaryOp(op='&', left=left, right=right, line=line, col=col)
         return left
 
     def parse_eq(self) -> Any:
@@ -574,8 +605,17 @@ class Parser:
 
     def parse_cmp(self) -> Any:
         line, col = self.loc()
-        left = self.parse_add()
+        left = self.parse_shift()
         while self.check(TT.LT, TT.GT, TT.LTE, TT.GTE):
+            op = self.advance().value
+            right = self.parse_shift()
+            left = ast.BinaryOp(op=op, left=left, right=right, line=line, col=col)
+        return left
+
+    def parse_shift(self) -> Any:
+        line, col = self.loc()
+        left = self.parse_add()
+        while self.check(TT.SHL, TT.SHR):
             op = self.advance().value
             right = self.parse_add()
             left = ast.BinaryOp(op=op, left=left, right=right, line=line, col=col)

@@ -125,6 +125,15 @@ def _addr(args, i):
     return 'NULL'
 
 
+_FIXPOINT_SHIFTS = {'fix16.16': 16, 'fix10.5': 5, 'fix1.15': 15}
+
+def _fixpoint_shift(typ) -> int:
+    """Return the fractional bit count for a fixed-point type, or 0."""
+    if isinstance(typ, ast.TypeName):
+        return _FIXPOINT_SHIFTS.get(typ.name, 0)
+    return 0
+
+
 # ── Type mappings ─────────────────────────────────────────────────────────────
 
 PRIMITIVE_TYPES = {
@@ -183,31 +192,56 @@ class CodegenError(Exception):
 
 
 class Codegen:
-    def __init__(self, filename: str = '<unknown>'):
+    def __init__(self, filename: str = '<unknown>', module_headers: dict = None):
         self.filename = filename
         self.indent = 0
         self.lines: List[str] = []
         self.includes: List[str] = []
         self.forward_decls: List[str] = []
         self.uses: List[str] = []
-        # Track assets
         self.assets: List[ast.AssetDecl] = []
-        # Track module name
         self.module_name: str = ''
-        # Track function names for forward decl
         self.fn_names: List[str] = []
-        # Map variant_name → enum_name for dot-access resolution
         self.enum_variants: dict = {}  # variant_case → enum_name
-        # Scope stack: list of {name: type_node} for pointer-member access
+        # Map of user module path → generated header filename (for cross-module includes)
+        self.module_headers: dict = module_headers or {}
+        # Scope stack: {name: type_node}
         self.scopes: List[dict] = [{}]
+        # Defer stack: each entry is a list of DeferStmt nodes for the current block
+        # Outer list = stack of scopes; inner list = defers in that scope (LIFO)
+        self._defer_stack: List[List[ast.DeferStmt]] = [[]]
 
     # ── Scope helpers ─────────────────────────────────────────────────────────
 
     def scope_push(self):
         self.scopes.append({})
+        self._defer_stack.append([])
 
     def scope_pop(self):
         self.scopes.pop()
+        self._defer_stack.pop()
+
+    def _defer_push(self, stmt: ast.DeferStmt):
+        """Register a defer in the current scope."""
+        self._defer_stack[-1].append(stmt)
+
+    def _emit_defers_for_scope(self, scope_idx: int, pad: str, indent: int) -> List[str]:
+        """Emit all defers for a given scope level in LIFO order."""
+        lines = []
+        for d in reversed(self._defer_stack[scope_idx]):
+            if isinstance(d.body, ast.Block):
+                for stmt in d.body.stmts:
+                    s = self.gen_stmt(stmt, indent)
+                    if s:
+                        lines.append(s)
+        return lines
+
+    def _emit_all_defers(self, pad: str, indent: int) -> List[str]:
+        """Emit ALL active defers (all scopes, innermost first). Used before return."""
+        lines = []
+        for scope_idx in range(len(self._defer_stack) - 1, -1, -1):
+            lines.extend(self._emit_defers_for_scope(scope_idx, pad, indent))
+        return lines
 
     def scope_set(self, name: str, typ):
         self.scopes[-1][name] = typ
@@ -219,9 +253,17 @@ class Codegen:
         return None
 
     def is_pointer(self, name: str) -> bool:
-        """Return True if the variable is a pointer type."""
         t = self.scope_get(name)
         return isinstance(t, ast.TypePointer)
+
+    def _expr_type(self, e):
+        """Best-effort: return the type node for an expression."""
+        if isinstance(e, ast.Ident):
+            return self.scope_get(e.name)
+        if isinstance(e, ast.DotAccess) and isinstance(e.obj, ast.Ident):
+            # could look up struct field — skip for now
+            pass
+        return None
 
     def emit(self, line: str = ''):
         if line:
@@ -355,6 +397,16 @@ class Codegen:
         if isinstance(e, ast.BinaryOp):
             left = self.gen_expr(e.left)
             right = self.gen_expr(e.right)
+            # Fixed-point arithmetic: detect operand types from scope
+            ltype = self._expr_type(e.left)
+            rtype = self._expr_type(e.right)
+            shift = _fixpoint_shift(ltype) or _fixpoint_shift(rtype)
+            if shift and e.op == '*':
+                # fix * fix → (int32_t)(((int64_t)(a) * (b)) >> shift)
+                return f'(int32_t)(((int64_t)({left}) * ({right})) >> {shift})'
+            if shift and e.op == '/':
+                # fix / fix → (int32_t)(((int64_t)(a) << shift) / (b))
+                return f'(int32_t)(((int64_t)({left}) << {shift}) / ({right}))'
             return f'({left} {e.op} {right})'
         if isinstance(e, ast.Assign):
             return f'{self.gen_expr(e.target)} {e.op} {self.gen_expr(e.value)}'
@@ -417,6 +469,12 @@ class Codegen:
             if inc and inc not in seen_includes:
                 out_lines.append(inc)
                 seen_includes.add(inc)
+            elif not inc and use_path in self.module_headers:
+                # User-defined module — include its generated header
+                header_line = f'#include "{self.module_headers[use_path]}"'
+                if header_line not in seen_includes:
+                    out_lines.append(header_line)
+                    seen_includes.add(header_line)
 
         # PakFS header if assets are present
         if self.assets:
@@ -585,6 +643,9 @@ class Codegen:
             stmt_str = self.gen_stmt(stmt, indent=1)
             if stmt_str:
                 lines.append(stmt_str)
+        # Emit defers at natural function exit (LIFO, current scope only)
+        for d_line in self._emit_defers_for_scope(-1, '    ', 1):
+            lines.append(d_line)
         self.scope_pop()
         lines.append('}')
         return '\n'.join(lines)
@@ -596,6 +657,8 @@ class Codegen:
             s = self.gen_stmt(stmt, indent=1)
             if s:
                 lines.append(s)
+        for d_line in self._emit_defers_for_scope(-1, '    ', 1):
+            lines.append(d_line)
         self.scope_pop()
         lines.append('    return 0;')
         lines.append('}')
@@ -608,7 +671,7 @@ class Codegen:
         return '\n'.join(lines)
 
     def gen_static_decl(self, s: ast.StaticDecl) -> str:
-        decl = self.gen_array_decl(s.name, s.type) if s.type else f'auto {s.name}'
+        decl = self.gen_array_decl(s.name, s.type) if s.type else f'__auto_type {s.name}'
         if '@aligned' in ' '.join(s.annotations):
             for ann in s.annotations:
                 if '@aligned' in ann:
@@ -621,7 +684,7 @@ class Codegen:
         return f'static {decl};'
 
     def gen_let_decl_global(self, s: ast.LetDecl) -> str:
-        decl = self.gen_array_decl(s.name, s.type) if s.type else f'auto {s.name}'
+        decl = self.gen_array_decl(s.name, s.type) if s.type else f'__auto_type {s.name}'
         if s.value and not isinstance(s.value, ast.UndefinedLit):
             return f'{decl} = {self.gen_expr(s.value)};'
         return f'{decl};'
@@ -634,9 +697,11 @@ class Codegen:
         if isinstance(stmt, ast.StaticDecl):
             return self.gen_static_stmt(stmt, pad)
         if isinstance(stmt, ast.Return):
-            if stmt.value is not None:
-                return f'{pad}return {self.gen_expr(stmt.value)};'
-            return f'{pad}return;'
+            # Emit all active defers before returning (LIFO across scopes)
+            defers = self._emit_all_defers(pad, indent)
+            val = f' {self.gen_expr(stmt.value)}' if stmt.value is not None else ''
+            lines = defers + [f'{pad}return{val};']
+            return '\n'.join(lines)
         if isinstance(stmt, ast.Break):
             return f'{pad}break;'
         if isinstance(stmt, ast.Continue):
@@ -656,7 +721,9 @@ class Codegen:
         if isinstance(stmt, ast.MatchStmt):
             return self.gen_match(stmt, pad, indent)
         if isinstance(stmt, ast.DeferStmt):
-            return self.gen_defer(stmt, pad, indent)
+            # Register the defer — don't emit it yet
+            self._defer_push(stmt)
+            return None
         if isinstance(stmt, ast.StructDecl):
             return self.gen_struct(stmt)
         if isinstance(stmt, ast.EnumDecl):
@@ -769,35 +836,35 @@ class Codegen:
         lines = []
 
         if isinstance(iterable, ast.RangeExpr):
+            # for i in start..end  →  for (int i = start; i < end; i++)
             start = self.gen_expr(iterable.start)
             end = self.gen_expr(iterable.end) if iterable.end else '0'
             if s.index:
-                lines.append(f'{pad}for (int {s.index} = {start}, {s.binding} = {start}; {s.index} < {end}; {s.index}++, {s.binding}++) {{')
+                lines.append(f'{pad}for (int {s.index} = {start}; {s.index} < {end}; {s.index}++) {{')
+                lines.append(f'{inner_pad}int {s.binding} = {s.index};')
             else:
                 lines.append(f'{pad}for (int {s.binding} = {start}; {s.binding} < {end}; {s.binding}++) {{')
-        elif isinstance(iterable, ast.Call) or isinstance(iterable, ast.DotAccess):
-            # for item in collection - use index-based loop
+        else:
+            # for item in array  →  index-based loop using sizeof
+            # Works correctly for [T; N] fixed arrays and struct fields.
+            # For dynamic slices (T*), the programmer must use a range loop with explicit length.
             coll = self.gen_expr(iterable)
+            # Register the binding variable in scope (type inferred from array element)
+            self.scope_set(s.binding, ast.TypeName(name='auto'))
             if s.index:
-                lines.append(f'{pad}for (int {s.index} = 0; {s.index} < (int)({coll}_len); {s.index}++) {{')
+                lines.append(f'{pad}for (int {s.index} = 0; {s.index} < (int)(sizeof({coll})/sizeof(({coll})[0])); {s.index}++) {{')
                 lines.append(f'{inner_pad}__typeof__(({coll})[0]) {s.binding} = ({coll})[{s.index}];')
             else:
-                lines.append(f'{pad}{{')
-                lines.append(f'{inner_pad}int _i = 0;')
-                lines.append(f'{inner_pad}for (; _i < (int)({coll}_len); _i++) {{')
-                lines.append(f'{inner_pad}    __typeof__(({coll})[0]) {s.binding} = ({coll})[_i];')
-                # close inner for later
-        else:
-            coll = self.gen_expr(iterable)
-            if s.index:
-                lines.append(f'{pad}for (int {s.index} = 0; {s.index} < (int)(sizeof({coll})/sizeof({coll}[0])); {s.index}++) {{')
-                lines.append(f'{inner_pad}__typeof__({coll}[0]) {s.binding} = {coll}[{s.index}];')
-            else:
-                lines.append(f'{pad}for (int _i_{s.binding} = 0; _i_{s.binding} < (int)(sizeof({coll})/sizeof({coll}[0])); _i_{s.binding}++) {{')
-                lines.append(f'{inner_pad}__typeof__({coll}[0]) {s.binding} = {coll}[_i_{s.binding}];')
+                lines.append(f'{pad}for (int _i_{s.binding} = 0; _i_{s.binding} < (int)(sizeof({coll})/sizeof(({coll})[0])); _i_{s.binding}++) {{')
+                lines.append(f'{inner_pad}__typeof__(({coll})[0]) {s.binding} = ({coll})[_i_{s.binding}];')
 
+        self.scope_push()
         for stmt in s.body.stmts:
             lines.append(self.gen_stmt(stmt, indent + 1))
+        # Emit defers before closing the loop body
+        for d_line in self._emit_defers_for_scope(-1, inner_pad, indent + 1):
+            lines.append(d_line)
+        self.scope_pop()
         lines.append(f'{pad}}}')
         return '\n'.join(l for l in lines if l is not None)
 
@@ -854,6 +921,6 @@ class Codegen:
         return '\n'.join(l for l in lines if l is not None)
 
 
-def generate(program: ast.Program, filename: str = '<unknown>') -> str:
-    cg = Codegen(filename)
+def generate(program: ast.Program, filename: str = '<unknown>', module_headers: dict = None) -> str:
+    cg = Codegen(filename, module_headers=module_headers)
     return cg.gen_program(program)

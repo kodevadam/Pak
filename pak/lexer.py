@@ -89,6 +89,13 @@ class TT(Enum):
     MINUS_EQ = auto()  # -=
     STAR_EQ = auto()   # *=
     SLASH_EQ = auto()  # /=
+    SHL = auto()       # <<
+    SHR = auto()       # >>
+    SHL_EQ = auto()    # <<=
+    SHR_EQ = auto()    # >>=
+    AMP_EQ = auto()    # &=
+    PIPE_EQ = auto()   # |=
+    CARET_EQ = auto()  # ^=
     UNDERSCORE = auto() # _
 
     EOF = auto()
@@ -318,11 +325,23 @@ class Lexer:
             elif ch == ',': tok(TT.COMMA)
             elif ch == ';': tok(TT.SEMICOLON)
             elif ch == '~': tok(TT.TILDE)
-            elif ch == '^': tok(TT.CARET)
             elif ch == ':': tok(TT.COLON)
             elif ch == '?': tok(TT.QUESTION)
-            elif ch == '&': tok(TT.AMP)
-            elif ch == '|': tok(TT.PIPE)
+            elif ch == '&':
+                if self.match('='):
+                    tok(TT.AMP_EQ, '&=')
+                else:
+                    tok(TT.AMP)
+            elif ch == '|':
+                if self.match('='):
+                    tok(TT.PIPE_EQ, '|=')
+                else:
+                    tok(TT.PIPE)
+            elif ch == '^':
+                if self.match('='):
+                    tok(TT.CARET_EQ, '^=')
+                else:
+                    tok(TT.CARET)
             elif ch == '%': tok(TT.PERCENT)
             elif ch == '.':
                 if self.match('.'):
@@ -342,12 +361,22 @@ class Lexer:
                 else:
                     tok(TT.BANG)
             elif ch == '<':
-                if self.match('='):
+                if self.match('<'):
+                    if self.match('='):
+                        tok(TT.SHL_EQ, '<<=')
+                    else:
+                        tok(TT.SHL, '<<')
+                elif self.match('='):
                     tok(TT.LTE, '<=')
                 else:
                     tok(TT.LT)
             elif ch == '>':
-                if self.match('='):
+                if self.match('>'):
+                    if self.match('='):
+                        tok(TT.SHR_EQ, '>>=')
+                    else:
+                        tok(TT.SHR, '>>')
+                elif self.match('='):
                     tok(TT.GTE, '>=')
                 else:
                     tok(TT.GT)

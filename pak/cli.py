@@ -7,11 +7,13 @@ import argparse
 import subprocess
 import tomllib
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 from .lexer import Lexer, LexError
 from .parser import Parser, ParseError, parse
 from .codegen import generate
+from .typechecker import typecheck_multi, PakError
+from .headergen import generate_header, module_to_filename, collect_module_includes
 from . import ast as pak_ast
 
 
@@ -30,32 +32,55 @@ def runtime_dir() -> Path:
     return Path(__file__).parent.parent / 'runtime'
 
 
-def compile_file(pak_file: Path, verbose: bool = False) -> tuple:
-    """Compile a .pak file, return (c_source, program)."""
+def parse_file(pak_file: Path, verbose: bool = False) -> Optional[pak_ast.Program]:
+    """Parse a .pak file and return the AST, or None on error."""
     source = pak_file.read_text(encoding='utf-8')
     if verbose:
-        print(f'  Lexing {pak_file.name}...')
+        print(f'  Parsing {pak_file.name}...')
     try:
-        program = parse(source, str(pak_file))
+        return parse(source, str(pak_file))
     except LexError as e:
         print(f'error[E001]: {e}', file=sys.stderr)
         print(f'  --> {pak_file}', file=sys.stderr)
-        sys.exit(1)
+        return None
     except ParseError as e:
         print(f'error[E002]: {e}', file=sys.stderr)
         print(f'  --> {pak_file}', file=sys.stderr)
+        return None
+
+
+def compile_file(pak_file: Path, verbose: bool = False,
+                 module_headers: dict = None) -> tuple:
+    """Parse and generate C for a .pak file. Returns (c_source, program) or exits."""
+    program = parse_file(pak_file, verbose)
+    if program is None:
         sys.exit(1)
 
     if verbose:
         print(f'  Generating C for {pak_file.name}...')
-    c_source = generate(program, str(pak_file))
+    c_source = generate(program, str(pak_file), module_headers=module_headers)
     return c_source, program
+
+
+def _print_errors(errors: List[PakError], pak_file: Path, root: Path = None) -> int:
+    """Print type errors and return the count."""
+    for err in errors:
+        print(str(err), file=sys.stderr)
+    return len(errors)
 
 
 def load_config(root: Path) -> dict:
     toml_path = root / 'pak.toml'
     with open(toml_path, 'rb') as f:
         return tomllib.load(f)
+
+
+def _get_module_path(program: pak_ast.Program) -> Optional[str]:
+    """Return the module path declared in a program, if any."""
+    for decl in program.decls:
+        if isinstance(decl, pak_ast.ModuleDecl):
+            return decl.path
+    return None
 
 
 def cmd_build(args):
@@ -82,30 +107,74 @@ def cmd_build(args):
     build_cfg = config.get('build', {})
     optimization = build_cfg.get('optimization', 'debug')
 
+    verbose = getattr(args, 'verbose', False)
+    strict = getattr(args, 'strict', False)
+
     print(f'Building {project_name}...')
 
     build_dir = root / 'build'
     build_dir.mkdir(exist_ok=True)
 
-    # ── 1. Compile .pak → .c ────────────────────────────────────────────
-    src_files = [f for f in root.glob('**/*.pak')
-                 if 'build' not in f.parts]
+    # ── 1. Parse all .pak files ───────────────────────────────────────────────
+    src_files = sorted(f for f in root.glob('**/*.pak') if 'build' not in f.parts)
     if not src_files:
         print('error: no .pak source files found', file=sys.stderr)
         sys.exit(1)
 
+    parsed: list = []  # [(pak_file, program)]
+    for pak_file in src_files:
+        program = parse_file(pak_file, verbose)
+        if program is None:
+            sys.exit(1)
+        parsed.append((pak_file, program))
+
+    # ── 2. Type-check all files together ──────────────────────────────────────
+    tc_input = [(str(pak_file), prog) for pak_file, prog in parsed]
+    all_errors = typecheck_multi(tc_input)
+    total_errors = 0
+    for filename, errors in all_errors.items():
+        if errors:
+            for err in errors:
+                print(str(err), file=sys.stderr)
+            total_errors += len(errors)
+    if total_errors > 0:
+        print(f'\n{total_errors} type error(s). Fix them before building.', file=sys.stderr)
+        if strict:
+            sys.exit(1)
+        print('  (continuing build with --no-strict)', file=sys.stderr)
+
+    # ── 3. Generate headers for modules ──────────────────────────────────────
+    # Map: module_path → header_filename (e.g. 'game.player' → 'game_player.h')
+    module_headers: dict = {}  # module_path → header filename
+    for pak_file, program in parsed:
+        mod_path = _get_module_path(program)
+        if mod_path:
+            header_name = module_to_filename(mod_path)
+            module_headers[mod_path] = header_name
+            # Write the header to the build dir
+            rel = pak_file.relative_to(root)
+            h_file = build_dir / rel.parent / header_name
+            h_file.parent.mkdir(parents=True, exist_ok=True)
+            h_source = generate_header(program, mod_path)
+            h_file.write_text(h_source, encoding='utf-8')
+            if verbose:
+                print(f'  Header  {rel} -> {h_file.relative_to(root)}')
+
+    # ── 4. Compile .pak → .c ─────────────────────────────────────────────────
     c_rel_paths = []
-    for pak_file in sorted(src_files):
+    for pak_file, program in parsed:
         rel = pak_file.relative_to(root)
         c_file = build_dir / rel.with_suffix('.c')
         c_file.parent.mkdir(parents=True, exist_ok=True)
 
-        c_source, _ = compile_file(pak_file, verbose=getattr(args, 'verbose', False))
+        if verbose:
+            print(f'  Generating C for {rel}...')
+        c_source = generate(program, str(pak_file), module_headers=module_headers)
         c_file.write_text(c_source, encoding='utf-8')
         c_rel_paths.append(c_file.relative_to(root))
         print(f'  Compiled {rel} -> {c_file.relative_to(root)}')
 
-    # ── 2. Copy runtime into project ─────────────────────────────────────
+    # ── 5. Copy runtime into project ──────────────────────────────────────────
     rt_src = runtime_dir()
     rt_dst = root / 'runtime'
     if rt_src.exists() and rt_src != rt_dst:
@@ -116,7 +185,7 @@ def cmd_build(args):
                 shutil.copy2(f, dst)
         print(f'  Runtime -> runtime/')
 
-    # ── 3. Pack assets into PakFS archive ────────────────────────────────
+    # ── 6. Pack assets into PakFS archive ────────────────────────────────────
     asset_dirs = config.get('assets', {})
     packable = []
     for kind, rel_dir in asset_dirs.items():
@@ -137,7 +206,7 @@ def cmd_build(args):
         pakfs_file.write_bytes(pack(packable))
         print(f'  Packed {len(packable)} asset(s) -> filesystem/{pakfs_name}')
 
-    # ── 4. Generate Makefile ─────────────────────────────────────────────
+    # ── 7. Generate Makefile ──────────────────────────────────────────────────
     from .makefile_gen import generate_makefile
     makefile = generate_makefile(
         project_name=project_name,
@@ -170,31 +239,57 @@ def cmd_build(args):
 def cmd_check(args):
     """Type-check without building."""
     root = find_project_root()
+
     if root is None:
+        # Single-file mode
         if getattr(args, 'files', None):
+            tc_input = []
             for f in args.files:
                 pak_file = Path(f)
-                try:
-                    compile_file(pak_file)
-                    print(f'{f}: ok')
-                except SystemExit:
-                    pass
+                program = parse_file(pak_file)
+                if program is not None:
+                    tc_input.append((str(pak_file), program))
+
+            if tc_input:
+                all_errors = typecheck_multi(tc_input)
+                total = 0
+                for filename, errors in all_errors.items():
+                    if errors:
+                        for err in errors:
+                            print(str(err), file=sys.stderr)
+                        total += len(errors)
+                    else:
+                        print(f'{filename}: ok')
+                if total:
+                    sys.exit(1)
             return
         print('error: no pak.toml found', file=sys.stderr)
         sys.exit(1)
 
-    src_files = [f for f in root.glob('**/*.pak')
-                 if 'build' not in f.parts]
-    errors = 0
-    for pak_file in sorted(src_files):
-        try:
-            compile_file(pak_file)
-            print(f'  {pak_file.relative_to(root)}: ok')
-        except SystemExit:
-            errors += 1
+    src_files = sorted(f for f in root.glob('**/*.pak') if 'build' not in f.parts)
+    tc_input = []
+    parse_errors = 0
+    for pak_file in src_files:
+        program = parse_file(pak_file)
+        if program is None:
+            parse_errors += 1
+        else:
+            tc_input.append((str(pak_file), program))
 
-    if errors:
-        print(f'\n{errors} error(s) found.')
+    all_errors = typecheck_multi(tc_input)
+    type_errors = 0
+    for filename, errors in all_errors.items():
+        rel = Path(filename).relative_to(root) if root else Path(filename)
+        if errors:
+            for err in errors:
+                print(str(err), file=sys.stderr)
+            type_errors += len(errors)
+        else:
+            print(f'  {rel}: ok')
+
+    total = parse_errors + type_errors
+    if total:
+        print(f'\n{total} error(s) found.', file=sys.stderr)
         sys.exit(1)
     else:
         print(f'\nAll {len(src_files)} file(s) passed.')
@@ -245,7 +340,7 @@ def cmd_init(args):
     (project_dir / 'assets' / 'sprites').mkdir()
     (project_dir / 'assets' / 'audio').mkdir()
 
-    # ── pak.toml ──────────────────────────────────────────────────────────
+    # ── pak.toml ──────────────────────────────────────────────────────────────
     (project_dir / 'pak.toml').write_text(f'''\
 [project]
 name = "{name}"
@@ -268,7 +363,7 @@ tiny3d = false
 optimization = "debug"
 ''', encoding='utf-8')
 
-    # ── src/main.pak ─────────────────────────────────────────────────────
+    # ── src/main.pak ──────────────────────────────────────────────────────────
     (project_dir / 'src' / 'main.pak').write_text(f'''\
 -- {name}
 -- Created with: pak init {name}
@@ -295,13 +390,13 @@ entry {{
 }}
 ''', encoding='utf-8')
 
-    # ── Copy runtime ─────────────────────────────────────────────────────
+    # ── Copy runtime ──────────────────────────────────────────────────────────
     rt_src = runtime_dir()
     if rt_src.exists():
         rt_dst = project_dir / 'runtime'
         shutil.copytree(rt_src, rt_dst)
 
-    # ── .gitignore ────────────────────────────────────────────────────────
+    # ── .gitignore ────────────────────────────────────────────────────────────
     (project_dir / '.gitignore').write_text('''\
 build/
 filesystem/
@@ -366,6 +461,8 @@ def main():
     # build
     p_build = sub.add_parser('build', help='Compile .pak to C, pack assets, generate Makefile')
     p_build.add_argument('-v', '--verbose', action='store_true')
+    p_build.add_argument('--strict', action='store_true',
+                         help='Fail on type errors (default: warn and continue)')
     p_build.set_defaults(func=cmd_build)
 
     # check
@@ -381,6 +478,7 @@ def main():
     # run
     p_run = sub.add_parser('run', help='Build then `make run` (launches in ares)')
     p_run.add_argument('-v', '--verbose', action='store_true')
+    p_run.add_argument('--strict', action='store_true')
     p_run.set_defaults(func=cmd_run)
 
     # init
