@@ -1702,3 +1702,348 @@ class TestPhase5Integration:
         assert has_instr(asm, 'main:')
         assert has_instr(asm, 'jal add')
         assert has_instr(asm, 'addu')
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 6 — Comprehensive integration tests (Dungeon of Types patterns)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestPhase6StructsAndEnums:
+    """Multi-feature struct + enum combinations from the test game."""
+
+    def test_nested_structs_with_fixed_point(self):
+        asm = compile_mips("""
+        struct Vec2 {
+            x: fix16.16
+            y: fix16.16
+        }
+        struct Stats {
+            hp: i32
+            max_hp: i32
+            speed: fix16.16
+        }
+        struct Player {
+            pos: Vec2
+            stats: Stats
+            level: u8
+        }
+        fn make_player() -> Player {
+            return Player {
+                pos: Vec2 { x: 100, y: 200 },
+                stats: Stats { hp: 100, max_hp: 100, speed: 2 },
+                level: 1
+            }
+        }
+        """)
+        assert 'make_player:' in asm
+
+    def test_enum_with_base_type_in_match(self):
+        asm = compile_mips("""
+        enum TileType: u8 {
+            floor
+            wall
+            door
+        }
+        fn is_walkable(t: TileType) -> bool {
+            match t {
+                .floor => { return true }
+                .door => { return true }
+                _ => { return false }
+            }
+        }
+        """)
+        assert 'is_walkable:' in asm
+        assert has_instr(asm, 'beq') or has_instr(asm, 'bne')
+
+    def test_enum_cast_and_array_store(self):
+        asm = compile_mips("""
+        enum TileType: u8 {
+            floor
+            wall
+        }
+        static tiles: [100]u8 = undefined
+        fn set_tile(idx: i32, t: TileType) {
+            tiles[idx] = t as u8
+        }
+        """)
+        assert 'set_tile:' in asm
+        assert has_instr(asm, 'sb') or has_instr(asm, 'sw')
+
+
+class TestPhase6VariantPatterns:
+    """Variant construction, match, and method interaction."""
+
+    def test_variant_constructor_with_payload(self):
+        asm = compile_mips("""
+        variant Pickup {
+            gold_pile { amount: i32 }
+            nothing
+        }
+        fn make_gold(n: i32) -> Pickup {
+            return gold_pile(n)
+        }
+        """)
+        assert 'make_gold:' in asm
+
+    def test_variant_match_with_payload_access(self):
+        asm = compile_mips("""
+        variant DamageResult {
+            hit { damage: i32, remaining: i32 }
+            miss
+            blocked { absorbed: i32 }
+        }
+        fn describe_damage(d: DamageResult) -> i32 {
+            match d {
+                .hit(h) => { return h.damage }
+                .miss => { return 0 }
+                .blocked(b) => { return 0 - b.absorbed }
+            }
+        }
+        """)
+        assert 'describe_damage:' in asm
+
+
+class TestPhase6MethodsAndResult:
+    """Impl methods + Result error handling."""
+
+    def test_impl_method_with_self_pointer(self):
+        asm = compile_mips("""
+        struct Counter {
+            value: i32
+            max: i32
+        }
+        impl Counter {
+            fn increment(self: *Counter) -> bool {
+                if self.value >= self.max {
+                    return false
+                }
+                self.value = self.value + 1
+                return true
+            }
+        }
+        entry {
+            let c = Counter { value: 0, max: 10 }
+            c.increment()
+        }
+        """)
+        assert 'Counter_increment:' in asm
+        assert 'main:' in asm
+
+    def test_result_ok_err_with_match(self):
+        asm = compile_mips("""
+        enum LoadError: u8 {
+            not_found
+            corrupt
+        }
+        fn try_load(level: i32) -> Result(i32, LoadError) {
+            if level < 0 {
+                return err(LoadError.not_found)
+            }
+            return ok(level)
+        }
+        entry {
+            let result = try_load(1)
+            match result {
+                ok(val) => {
+                    let x = val + 1
+                }
+                err(e) => {
+                    let x: i32 = 0
+                }
+            }
+        }
+        """)
+        assert 'try_load:' in asm
+        assert 'main:' in asm
+
+
+class TestPhase6FixedPointAndRecursion:
+    """Fixed-point arithmetic + recursive functions + function pointers."""
+
+    def test_fixed_point_multiply_in_function(self):
+        asm = compile_mips("""
+        fn fix_mul(a: fix16.16, b: fix16.16) -> fix16.16 {
+            return a * b
+        }
+        fn update_speed(speed: fix16.16, friction: fix16.16) -> fix16.16 {
+            return fix_mul(speed, friction)
+        }
+        """)
+        assert 'fix_mul:' in asm
+        assert 'update_speed:' in asm
+        assert has_instr(asm, 'mult') or has_instr(asm, 'jal fix_mul')
+
+    def test_recursive_factorial(self):
+        asm = compile_mips("""
+        fn factorial(n: i32) -> i32 {
+            if n <= 1 { return 1 }
+            return n * factorial(n - 1)
+        }
+        entry {
+            let r = factorial(10)
+        }
+        """)
+        assert 'factorial:' in asm
+        assert has_instr(asm, 'jal factorial')
+
+    def test_function_pointer_call(self):
+        asm = compile_mips("""
+        fn double(x: i32) -> i32 {
+            return x * 2
+        }
+        fn apply(f: fn(i32) -> i32, val: i32) -> i32 {
+            return f(val)
+        }
+        entry {
+            let r = apply(double, 5)
+        }
+        """)
+        assert 'double:' in asm
+        assert 'apply:' in asm
+        assert has_instr(asm, 'jalr') or has_instr(asm, 'jal')
+
+
+class TestPhase6ControlFlowCombinations:
+    """Complex control flow: nested loops, match inside loop, defer."""
+
+    def test_nested_while_loops(self):
+        asm = compile_mips("""
+        static grid: [100]i32 = undefined
+        fn fill_grid() {
+            let y: i32 = 0
+            while y < 10 {
+                let x: i32 = 0
+                while x < 10 {
+                    grid[y * 10 + x] = x + y
+                    x = x + 1
+                }
+                y = y + 1
+            }
+        }
+        """)
+        assert 'fill_grid:' in asm
+
+    def test_match_inside_loop(self):
+        asm = compile_mips("""
+        enum State: u8 {
+            running
+            paused
+            done
+        }
+        fn game_loop() {
+            let state = State.running
+            let frames: i32 = 0
+            loop {
+                match state {
+                    .running => {
+                        frames = frames + 1
+                        if frames > 60 {
+                            state = State.done
+                        }
+                    }
+                    .paused => {
+                        let wait: i32 = 0
+                    }
+                    .done => {
+                        break
+                    }
+                }
+            }
+        }
+        """)
+        assert 'game_loop:' in asm
+
+    def test_defer_before_multiple_returns(self):
+        asm = compile_mips("""
+        fn process(n: i32) -> i32 {
+            defer {
+                let cleanup: i32 = 0
+            }
+            if n < 0 { return -1 }
+            if n == 0 { return 0 }
+            return n * 2
+        }
+        """)
+        assert 'process:' in asm
+
+    def test_for_range_with_break(self):
+        asm = compile_mips("""
+        fn find_first_over(threshold: i32) -> i32 {
+            for i in 0..100 {
+                if i * i > threshold {
+                    return i
+                }
+            }
+            return -1
+        }
+        """)
+        assert 'find_first_over:' in asm
+
+
+class TestPhase6EdgeCases:
+    """Integer edge cases, deeply nested expressions, bitwise ops."""
+
+    def test_bitwise_and_shift_operations(self):
+        asm = compile_mips("""
+        fn extract_bits(val: i32) -> i32 {
+            let masked = (val & 0xFF00) >> 8
+            let combined = masked | (val & 0x00FF)
+            let shifted = 1 << 16
+            return combined ^ shifted
+        }
+        """)
+        assert 'extract_bits:' in asm
+        assert has_instr(asm, 'and') or has_instr(asm, 'andi')
+        assert has_instr(asm, 'srl') or has_instr(asm, 'sra') or has_instr(asm, 'sll')
+
+    def test_deeply_nested_arithmetic(self):
+        asm = compile_mips("""
+        fn deep_calc(a: i32, b: i32, c: i32) -> i32 {
+            return ((((a + b) * c) - (a * b)) / (c + 1)) + ((a * c) - (b + a))
+        }
+        """)
+        assert 'deep_calc:' in asm
+
+    def test_boolean_short_circuit(self):
+        asm = compile_mips("""
+        fn check(a: bool, b: bool, c: bool) -> bool {
+            return (a and not b) or (b and not c) or (c and a)
+        }
+        """)
+        assert 'check:' in asm
+
+    def test_multiple_returns_and_early_exit(self):
+        asm = compile_mips("""
+        fn classify(n: i32) -> i32 {
+            if n < 0 { return -1 }
+            if n == 0 { return 0 }
+            if n < 10 { return 1 }
+            if n < 100 { return 2 }
+            if n < 1000 { return 3 }
+            return 4
+        }
+        """)
+        assert 'classify:' in asm
+        # Should have branching for multiple return paths
+        assert has_instr(asm, 'jr $ra')
+        # Should have multiple comparison branches
+        branch_count = sum(1 for line in asm.split('\n')
+                          if any(op in line for op in ['bne', 'beq', 'blt', 'bge', 'slt']))
+        assert branch_count >= 3
+
+
+class TestPhase6InlineAsm:
+    """Inline assembly pass-through."""
+
+    def test_inline_asm_in_function(self):
+        asm = compile_mips("""
+        fn sync_caches() {
+            asm {
+                "sync"
+                "nop"
+            }
+        }
+        """)
+        assert 'sync_caches:' in asm
+        assert '    sync' in asm
+        assert '    nop' in asm
