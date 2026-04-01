@@ -64,6 +64,10 @@ class TT(Enum):
     DYN = auto()
     ALLOC = auto()
     FREE = auto()
+    GOTO = auto()
+    DO = auto()
+    UNION = auto()
+    COMPTIME = auto()
 
     # Annotations
     ANNOTATION = auto()  # @something
@@ -168,6 +172,10 @@ KEYWORDS = {
     'dyn': TT.DYN,
     'alloc': TT.ALLOC,
     'free': TT.FREE,
+    'goto': TT.GOTO,
+    'do': TT.DO,
+    'union': TT.UNION,
+    'comptime': TT.COMPTIME,
     '_': TT.UNDERSCORE,
 }
 

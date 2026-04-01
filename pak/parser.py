@@ -117,6 +117,8 @@ class Parser:
             decl = self.parse_const()
         elif tok.type == TT.TRAIT:
             decl = self.parse_trait(annotations)
+        elif tok.type == TT.UNION:
+            decl = self.parse_union(annotations)
         else:
             raise ParseError(f'Unexpected token at top level', tok)
 
@@ -394,6 +396,31 @@ class Parser:
                 self.advance()  # skip stray tokens
         self.expect(TT.RBRACE)
         return ast.TraitDecl(name=name, methods=methods,
+                             annotations=annotations or [], line=line, col=col)
+
+    def parse_union(self, annotations=None) -> ast.UnionDecl:
+        """union Name { field: Type; ... } — untagged C union."""
+        line, col = self.loc()
+        self.expect(TT.UNION)
+        name = self.expect(TT.IDENT).value
+        self.expect(TT.LBRACE)
+        fields = []
+        while not self.check(TT.RBRACE) and not self.check(TT.EOF):
+            ann = []
+            while self.check(TT.ANNOTATION):
+                ann.append(self.advance().value)
+            if self.check(TT.FN):
+                # Unions can have methods too (impl block preferred, but allow here)
+                break
+            if self.check(TT.IDENT):
+                fname = self.advance().value
+                self.expect(TT.COLON)
+                ftype = self.parse_type()
+                fields.append(ast.StructField(name=fname, type=ftype,
+                                              annotations=ann, line=line, col=col))
+            self.match(TT.COMMA)
+        self.expect(TT.RBRACE)
+        return ast.UnionDecl(name=name, fields=fields,
                              annotations=annotations or [], line=line, col=col)
 
     def parse_const(self) -> ast.ConstDecl:
@@ -679,6 +706,35 @@ class Parser:
             return self.parse_const()
         elif tok.type == TT.ASM:
             return self.parse_asm_stmt()
+        elif tok.type == TT.GOTO:
+            self.advance()
+            label = self.expect(TT.IDENT).value
+            return ast.GotoStmt(label=label, line=line, col=col)
+        elif tok.type == TT.DO:
+            # do { body } while cond
+            self.advance()
+            body = self.parse_block()
+            self.expect(TT.WHILE)
+            cond = self.parse_expr()
+            return ast.DoWhileStmt(body=body, condition=cond, line=line, col=col)
+        elif tok.type == TT.COMPTIME:
+            # comptime if (expr) { ... } else { ... }
+            self.advance()
+            self.expect(TT.IF)
+            self.expect(TT.LPAREN)
+            cond = self.parse_expr()
+            self.expect(TT.RPAREN)
+            then = self.parse_block()
+            else_b = None
+            if self.match(TT.ELSE):
+                else_b = self.parse_block()
+            return ast.ComptimeIf(condition=cond, then=then, else_branch=else_b,
+                                  line=line, col=col)
+        elif tok.type == TT.IDENT and self.peek(1).type == TT.COLON and self.peek(2).type != TT.COLON:
+            # label_name: — label declaration (but not :: which is a path separator)
+            label_name = self.advance().value
+            self.advance()  # consume ':'
+            return ast.LabelStmt(name=label_name, line=line, col=col)
         else:
             expr = self.parse_expr()
             return ast.ExprStmt(expr=expr, line=line, col=col)

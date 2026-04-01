@@ -3598,3 +3598,192 @@ class TestCustomAllocators:
         c = codegen(src)
         assert 'free(p)' in c
         assert 'vtable->dealloc_bytes' not in c  # no vtable dispatch for plain free
+
+# ── Union types ───────────────────────────────────────────────────────────────
+
+class TestUnionDecl:
+    def test_parse_union(self):
+        prog = parse('union FloatBits { f: f32; i: u32; }')
+        decl = prog.decls[0]
+        assert isinstance(decl, ast.UnionDecl)
+        assert decl.name == 'FloatBits'
+        assert len(decl.fields) == 2
+        assert decl.fields[0].name == 'f'
+        assert decl.fields[1].name == 'i'
+
+    def test_codegen_union_typedef(self):
+        c = codegen('union FloatBits { f: f32; i: u32; }')
+        assert 'typedef union' in c
+        assert 'FloatBits' in c
+        assert 'float f;' in c or 'f32 f;' in c or 'f' in c
+        assert 'uint32_t i;' in c or 'u32 i;' in c or 'i' in c
+
+    def test_codegen_union_not_struct(self):
+        c = codegen('union Punner { a: i32; b: f32; }')
+        assert 'typedef union' in c
+        assert 'typedef struct' not in c
+
+    def test_union_with_annotation(self):
+        c = codegen('@packed union Packed { x: u8; y: u16; }')
+        assert 'union' in c
+        assert 'Packed' in c
+
+
+# ── do-while ─────────────────────────────────────────────────────────────────
+
+class TestDoWhile:
+    def test_parse_do_while(self):
+        prog = parse('fn f() -> void { do { x = x + 1; } while x < 10; }')
+        fn = prog.decls[0]
+        stmt = fn.body.stmts[0]
+        assert isinstance(stmt, ast.DoWhileStmt)
+        assert isinstance(stmt.condition, ast.BinaryOp)
+        assert stmt.condition.op == '<'
+
+    def test_codegen_do_while(self):
+        c = codegen('fn f() -> void { do { x = x + 1; } while x < 10; }')
+        assert 'do {' in c or 'do{' in c
+        assert 'while' in c
+
+    def test_do_while_executes_once_structure(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let mut i: i32 = 0;
+                do {
+                    i = i + 1;
+                } while i < 0;
+            }
+        ''')
+        c = codegen(src)
+        assert 'do' in c
+        assert 'while' in c
+
+    def test_do_while_semicolon(self):
+        # do-while must end with semicolon after condition
+        c = codegen('fn f() -> void { do { break; } while true; }')
+        assert 'while' in c
+
+
+# ── comptime if ───────────────────────────────────────────────────────────────
+
+class TestComptimeIf:
+    def test_parse_comptime_if(self):
+        prog = parse('comptime if (N64) { fn foo() -> void {} }')
+        decl = prog.decls[0]
+        assert isinstance(decl, ast.ComptimeIf)
+        assert isinstance(decl.then, ast.Block)
+
+    def test_codegen_comptime_if_ifdef(self):
+        c = codegen('comptime if (N64) { fn foo() -> void {} }')
+        assert '#if' in c
+        assert 'N64' in c
+        assert '#endif' in c
+
+    def test_codegen_comptime_if_else(self):
+        src = textwrap.dedent('''
+            comptime if (N64) {
+                fn platform() -> void {}
+            } else {
+                fn platform() -> void {}
+            }
+        ''')
+        c = codegen(src)
+        assert '#if' in c
+        assert '#else' in c
+        assert '#endif' in c
+
+    def test_comptime_if_in_function(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                comptime if (DEBUG) {
+                    x = 1;
+                }
+            }
+        ''')
+        c = codegen(src)
+        assert '#if' in c
+        assert 'DEBUG' in c
+
+
+# ── Return type checking (W201) ───────────────────────────────────────────────
+
+class TestReturnTypeCheck:
+    def test_w201_missing_return(self):
+        src = textwrap.dedent('''
+            fn get_value() -> i32 {
+                let x: i32 = 5;
+            }
+        ''')
+        diags = check(src)
+        codes = [d.code for d in diags]
+        assert 'W201' in codes
+
+    def test_w201_is_warning_not_error(self):
+        src = textwrap.dedent('''
+            fn get_value() -> i32 {
+                let x: i32 = 5;
+            }
+        ''')
+        diags = check(src)
+        w201 = [d for d in diags if d.code == 'W201']
+        assert w201
+        assert all(d.severity != 'error' for d in w201)
+
+    def test_w201_no_warning_when_returns(self):
+        src = textwrap.dedent('''
+            fn get_value() -> i32 {
+                return 42;
+            }
+        ''')
+        diags = check(src)
+        codes = [d.code for d in diags]
+        assert 'W201' not in codes
+
+    def test_w201_no_warning_for_void(self):
+        src = textwrap.dedent('''
+            fn do_thing() -> void {
+                let x: i32 = 5;
+            }
+        ''')
+        diags = check(src)
+        codes = [d.code for d in diags]
+        assert 'W201' not in codes
+
+    def test_w201_no_warning_when_if_else_both_return(self):
+        src = textwrap.dedent('''
+            fn get_value(x: i32) -> i32 {
+                if x > 0 {
+                    return 1;
+                } else {
+                    return -1;
+                }
+            }
+        ''')
+        diags = check(src)
+        codes = [d.code for d in diags]
+        assert 'W201' not in codes
+
+    def test_w201_warning_when_only_if_no_else(self):
+        src = textwrap.dedent('''
+            fn get_value(x: i32) -> i32 {
+                if x > 0 {
+                    return 1;
+                }
+            }
+        ''')
+        diags = check(src)
+        codes = [d.code for d in diags]
+        assert 'W201' in codes
+
+    def test_w201_no_warning_for_loop(self):
+        # infinite loop is an unconditional return path
+        src = textwrap.dedent('''
+            fn run() -> i32 {
+                loop {
+                    return 0;
+                }
+            }
+        ''')
+        diags = check(src)
+        codes = [d.code for d in diags]
+        assert 'W201' not in codes

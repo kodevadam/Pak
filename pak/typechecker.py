@@ -67,7 +67,7 @@ class TypeEnv:
             self._collect_one(decl)
 
     def _collect_one(self, decl):
-        if isinstance(decl, ast.StructDecl):
+        if isinstance(decl, (ast.StructDecl, ast.UnionDecl)):
             self.structs[decl.name] = decl
         elif isinstance(decl, ast.EnumDecl):
             self.enums[decl.name] = decl
@@ -328,8 +328,8 @@ class TypeChecker:
                                  hint=f"Remove this method or add it to trait '{decl.trait_name}'")
             for m in decl.methods:
                 self._check_fn(m)
-        elif isinstance(decl, ast.TraitDecl):
-            pass  # trait bodies are just signatures — nothing to check
+        elif isinstance(decl, (ast.TraitDecl, ast.UnionDecl)):
+            pass  # trait/union bodies have no expressions to check
         elif isinstance(decl, ast.CfgBlock):
             self._check_naming(decl.decl)
             self._check_top(decl.decl)
@@ -361,7 +361,39 @@ class TypeChecker:
         # @no_alloc: walk body for heap allocations
         if any(a == '@no_alloc' for a in (fn.annotations or [])):
             self._check_no_alloc_body(fn.body, fn)
+        # Return type checking: non-void functions must have at least one return
+        self._check_fn_returns(fn)
         self._current_fn = old_fn
+
+    def _check_fn_returns(self, fn: ast.FnDecl):
+        """Warn (W201) if a non-void function has no reachable return statement."""
+        if fn.ret_type is None:
+            return
+        if isinstance(fn.ret_type, ast.TypeName) and fn.ret_type.name in ('void', 'never'):
+            return
+        if not fn.body or not fn.body.stmts:
+            self.warn('W201', f"non-void function '{fn.name}' has no return statement", fn,
+                      hint="Add a return statement or change the return type to void")
+            return
+        if not self._block_has_return(fn.body):
+            self.warn('W201', f"non-void function '{fn.name}' may not return a value on all paths",
+                      fn, hint="Ensure all code paths return a value")
+
+    def _block_has_return(self, block) -> bool:
+        """Return True if the block always ends with a return/break/continue."""
+        if not block or not block.stmts:
+            return False
+        last = block.stmts[-1]
+        if isinstance(last, ast.Return):
+            return True
+        if isinstance(last, ast.IfStmt):
+            # Only guaranteed if both then and else branches return
+            if last.else_branch and self._block_has_return(last.then) \
+                    and self._block_has_return(last.else_branch):
+                return True
+        if isinstance(last, ast.LoopStmt):
+            return True  # infinite loop — never falls through
+        return False
 
     def _check_no_alloc_body(self, block: ast.Block, fn: ast.FnDecl):
         """Walk a function body and error on any heap-allocating calls."""
@@ -463,6 +495,16 @@ class TypeChecker:
             self.scope.declare(stmt.name, stmt.type or ast.TypeName(name='auto'))
         elif isinstance(stmt, ast.AsmStmt):
             pass  # raw asm — nothing to check
+        elif isinstance(stmt, (ast.GotoStmt, ast.LabelStmt)):
+            pass  # goto/labels don't introduce new bindings
+        elif isinstance(stmt, ast.DoWhileStmt):
+            self._check_block(stmt.body)
+            self._check_expr(stmt.condition)
+        elif isinstance(stmt, ast.ComptimeIf):
+            self._check_expr(stmt.condition)
+            self._check_block(stmt.then)
+            if stmt.else_branch:
+                self._check_block(stmt.else_branch)
 
     def _check_let(self, s: ast.LetDecl):
         if s.value:

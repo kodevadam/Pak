@@ -401,7 +401,13 @@ MODULE_API: dict = {
     ('str', 'len'):                  lambda args: f'({args[0]}).len',
     ('str', 'data'):                 lambda args: f'({args[0]}).data',
     ('str', 'print'):                lambda args: f'debugf("%.*s", ({args[0]}).len, ({args[0]}).data)',
-    ('str', 'concat'):               lambda args: f'/* str.concat: use arena */ pak_str_from_cstr({args[0]}.data)',
+    # str.concat(a, b, buf, buf_size) → snprintf(buf, buf_size, "%.*s%.*s", ...)
+    ('str', 'concat'):               lambda args: (
+        f'(snprintf({args[2]}, (size_t)({args[3]}), "%.*s%.*s", '
+        f'(int)({args[0]}).len, ({args[0]}).data, '
+        f'(int)({args[1]}).len, ({args[1]}).data), '
+        f'(PakStr){{.data={args[2]}, .len=(int32_t)strlen({args[2]})}})'
+        if len(args) >= 4 else f'pak_str_from_cstr(({args[0]}).data)'),
 
     # arena module — PakArena helpers
     ('arena', 'alloc'):              lambda args: f'pak_arena_alloc({_addr(args,0)}, {args[1] if len(args)>1 else "0"})',
@@ -1676,6 +1682,27 @@ class Codegen:
                 return f'(const uint8_t *)({obj})'
             if method == 'to_pakstr' and not a:
                 return f'pak_str_from_cstr({obj})'
+            # find(needle) → byte offset of first occurrence, or -1
+            if method == 'find' and len(a) == 1:
+                return (f'({{ const char *_h = strstr({obj}, {a[0]}); '
+                        f'_h ? (int32_t)(_h - ({obj})) : -1; }})')
+            # slice(start) → pointer into string at offset
+            if method == 'slice' and len(a) == 1:
+                return f'(({obj}) + ({a[0]}))'
+            # slice(start, len) → PakStr fat-slice
+            if method == 'slice' and len(a) == 2:
+                return f'(PakStr){{.data = ({obj}) + ({a[0]}), .len = ({a[1]})}}'
+            # copy_to(buf, buf_size) → strncpy null-terminated into buf
+            if method == 'copy_to' and len(a) == 2:
+                return f'(snprintf({a[0]}, (size_t)({a[1]}), "%s", {obj}), {a[0]})'
+            # concat_into(buf, buf_size, other) → append other to buf
+            if method == 'concat_into' and len(a) == 3:
+                return (f'(snprintf({a[0]}, (size_t)({a[1]}), "%s%s", {obj}, {a[2]}), {a[0]})')
+            # format_into(buf, buf_size, fmt, ...) → snprintf
+            if method == 'format_into' and len(a) >= 2:
+                rest = ', '.join(a[2:])
+                fmt_arg = f', {rest}' if rest else ''
+                return f'snprintf({a[0]}, (size_t)({a[1]}), {obj}{fmt_arg})'
 
         if is_pakstr:
             if method == 'len' and not a:
@@ -1691,6 +1718,27 @@ class Codegen:
             if method == 'contains' and len(a) == 1:
                 return (f'(memmem(({obj}).data, (size_t)({obj}).len, '
                         f'({a[0]}).data, (size_t)({a[0]}).len) != NULL)')
+            # find(needle: PakStr) → byte offset or -1
+            if method == 'find' and len(a) == 1:
+                return (f'({{ const void *_h = memmem(({obj}).data, (size_t)({obj}).len, '
+                        f'({a[0]}).data, (size_t)({a[0]}).len); '
+                        f'_h ? (int32_t)((const char *)_h - ({obj}).data) : -1; }})')
+            # slice(start, len) → PakStr sub-slice
+            if method == 'slice' and len(a) == 2:
+                return f'(PakStr){{.data = ({obj}).data + ({a[0]}), .len = ({a[1]})}}'
+            # starts_with(prefix: PakStr)
+            if method == 'starts_with' and len(a) == 1:
+                return (f'(({obj}).len >= ({a[0]}).len && '
+                        f'memcmp(({obj}).data, ({a[0]}).data, (size_t)({a[0]}).len) == 0)')
+            # ends_with(suffix: PakStr)
+            if method == 'ends_with' and len(a) == 1:
+                return (f'(({obj}).len >= ({a[0]}).len && '
+                        f'memcmp(({obj}).data + ({obj}).len - ({a[0]}).len, '
+                        f'({a[0]}).data, (size_t)({a[0]}).len) == 0)')
+            # copy_to(buf, buf_size) → copy data into a mutable buffer, null-terminated
+            if method == 'copy_to' and len(a) == 2:
+                return (f'(snprintf({a[0]}, (size_t)({a[1]}), "%.*s", '
+                        f'(int)({obj}).len, ({obj}).data), {a[0]})')
 
         return None
 
@@ -1712,9 +1760,9 @@ class Codegen:
                     if tname not in self.method_registry:
                         self.method_registry[tname] = {}
                     self.method_registry[tname][decl.name] = decl
-            elif isinstance(decl, ast.StructDecl):
+            elif isinstance(decl, (ast.StructDecl, ast.UnionDecl)):
                 self.struct_fields[decl.name] = {f.name: f.type for f in decl.fields}
-                if decl.type_params:
+                if isinstance(decl, ast.StructDecl) and decl.type_params:
                     self._generic_structs[decl.name] = decl
             elif isinstance(decl, ast.EnumDecl):
                 for v in decl.variants:
@@ -1946,6 +1994,8 @@ class Codegen:
             return self.gen_impl_trait(decl)
         if isinstance(decl, ast.CfgBlock):
             return self.gen_cfg_block(decl)
+        if isinstance(decl, ast.UnionDecl):
+            return self.gen_union(decl)
         return f'/* unhandled decl: {type(decl).__name__} */'
 
     def gen_impl(self, impl: ast.ImplBlock) -> str:
@@ -2177,6 +2227,15 @@ class Codegen:
         lines.append(f'}} {s.name}{suffix};')
         return '\n'.join(lines)
 
+    def gen_union(self, u: ast.UnionDecl) -> str:
+        """Emit an untagged C union for type-punning."""
+        lines = [f'typedef union {{']
+        for field in u.fields:
+            decl = self.gen_array_decl(field.name, field.type)
+            lines.append(f'    {decl};')
+        lines.append(f'}} {u.name};')
+        return '\n'.join(lines)
+
     def gen_enum(self, e: ast.EnumDecl) -> str:
         base = PRIMITIVE_TYPES.get(e.base_type, 'int') if e.base_type else 'int'
         lines = [f'typedef enum {{']
@@ -2376,6 +2435,12 @@ class Codegen:
             return f'{pad}break;'
         if isinstance(stmt, ast.Continue):
             return f'{pad}continue;'
+        if isinstance(stmt, ast.GotoStmt):
+            return f'{pad}goto {stmt.label};'
+        if isinstance(stmt, ast.LabelStmt):
+            # Labels are dedented one level so they're visible at block scope
+            label_pad = pad[4:] if len(pad) >= 4 else ''
+            return f'{label_pad}{stmt.name}:'
         if isinstance(stmt, ast.ExprStmt):
             # CatchExpr as a bare statement: call the function and run the error
             # handler if the call fails, discarding the ok value.
@@ -2412,6 +2477,35 @@ class Codegen:
             return f'{pad}__asm__ {vol}({asm_lines});'
         if isinstance(stmt, ast.ConstDecl):
             return self.gen_const(stmt)
+        if isinstance(stmt, ast.DoWhileStmt):
+            body_lines = []
+            for s in stmt.body.stmts:
+                r = self.gen_stmt(s, indent + 1)
+                if r:
+                    body_lines.append(r)
+            cond = self.gen_expr(stmt.condition)
+            inner = '\n'.join(body_lines)
+            return f'{pad}do {{\n{inner}\n{pad}}} while ({cond});'
+        if isinstance(stmt, ast.ComptimeIf):
+            cond = self.gen_expr(stmt.condition)
+            then_lines = []
+            for s in stmt.then.stmts:
+                r = self.gen_stmt(s, indent)
+                if r:
+                    then_lines.append(r)
+            then_body = '\n'.join(then_lines)
+            result = f'#if {cond}\n{then_body}'
+            if stmt.else_branch:
+                else_lines = []
+                for s in stmt.else_branch.stmts:
+                    r = self.gen_stmt(s, indent)
+                    if r:
+                        else_lines.append(r)
+                result += f'\n#else\n' + '\n'.join(else_lines)
+            result += f'\n#endif'
+            return result
+        if isinstance(stmt, ast.UnionDecl):
+            return self.gen_union(stmt)
         return f'{pad}/* unhandled stmt: {type(stmt).__name__} */'
 
     def gen_let_stmt(self, s: ast.LetDecl, pad: str) -> str:

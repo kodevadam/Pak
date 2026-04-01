@@ -419,6 +419,23 @@ class WhileStmt:
     col: int = 0
 
 @dataclass
+class DoWhileStmt:
+    """do { body } while cond — execute body first, then check condition."""
+    body: Any
+    condition: Any
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class ComptimeIf:
+    """comptime if (expr) { ... } else { ... } — emits #if / #else / #endif."""
+    condition: Any       # expression that maps to a C preprocessor condition
+    then: Any            # Block
+    else_branch: Optional[Any] = None   # Block or None
+    line: int = 0
+    col: int = 0
+
+@dataclass
 class ForStmt:
     index: Optional[str]
     binding: str
@@ -459,6 +476,20 @@ class AsmStmt:
     """Bare asm { "line1" "line2" } statement block."""
     lines: List[str]
     volatile: bool = True
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class GotoStmt:
+    """goto label_name;"""
+    label: str
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class LabelStmt:
+    """label_name: — a C label, used as goto target."""
+    name: str
     line: int = 0
     col: int = 0
 
@@ -511,6 +542,15 @@ class StructDecl:
     name: str
     fields: List[Any]
     type_params: List[str] = field(default_factory=list)
+    annotations: List[str] = field(default_factory=list)
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class UnionDecl:
+    """union Name { field: Type; ... } — untagged C union for type-punning."""
+    name: str
+    fields: List[Any]            # same StructField nodes as StructDecl
     annotations: List[str] = field(default_factory=list)
     line: int = 0
     col: int = 0
