@@ -110,6 +110,7 @@ def cmd_build(args):
     verbose = getattr(args, 'verbose', False)
     # Strict by default — pass --permissive to continue despite type errors
     permissive = getattr(args, 'permissive', False)
+    no_style_warnings = getattr(args, 'no_style_warnings', False)
 
     print(f'Building {project_name}...')
 
@@ -131,13 +132,19 @@ def cmd_build(args):
 
     # ── 2. Type-check all files together ──────────────────────────────────────
     tc_input = [(str(pak_file), prog) for pak_file, prog in parsed]
-    all_errors = typecheck_multi(tc_input)
+    all_results = typecheck_multi(tc_input, no_style_warnings=no_style_warnings)
     total_errors = 0
-    for filename, errors in all_errors.items():
-        if errors:
-            for err in errors:
-                print(str(err), file=sys.stderr)
-            total_errors += len(errors)
+    total_warnings = 0
+    for filename, diagnostics in all_results.items():
+        for d in diagnostics:
+            print(str(d), file=sys.stderr)
+            if d.is_warning:
+                total_warnings += 1
+            else:
+                total_errors += 1
+    if total_warnings > 0:
+        print(f'\n{total_warnings} style warning(s). Use --no-style-warnings to suppress.',
+              file=sys.stderr)
     if total_errors > 0:
         print(f'\n{total_errors} type error(s).', file=sys.stderr)
         if not permissive:
@@ -258,6 +265,7 @@ def cmd_build(args):
 def cmd_check(args):
     """Type-check without building."""
     root = find_project_root()
+    no_style_warnings = getattr(args, 'no_style_warnings', False)
 
     if root is None:
         # Single-file mode
@@ -270,16 +278,18 @@ def cmd_check(args):
                     tc_input.append((str(pak_file), program))
 
             if tc_input:
-                all_errors = typecheck_multi(tc_input)
-                total = 0
-                for filename, errors in all_errors.items():
-                    if errors:
-                        for err in errors:
-                            print(str(err), file=sys.stderr)
-                        total += len(errors)
-                    else:
-                        print(f'{filename}: ok')
-                if total:
+                all_results = typecheck_multi(tc_input, no_style_warnings=no_style_warnings)
+                errors = warnings = 0
+                for filename, diagnostics in all_results.items():
+                    for d in diagnostics:
+                        print(str(d), file=sys.stderr)
+                        if d.is_warning:
+                            warnings += 1
+                        else:
+                            errors += 1
+                if warnings and not no_style_warnings:
+                    print(f'\n{warnings} style warning(s).', file=sys.stderr)
+                if errors:
                     sys.exit(1)
             return
         print('error: no pak.toml found', file=sys.stderr)
@@ -295,22 +305,27 @@ def cmd_check(args):
         else:
             tc_input.append((str(pak_file), program))
 
-    all_errors = typecheck_multi(tc_input)
-    type_errors = 0
-    for filename, errors in all_errors.items():
+    all_results = typecheck_multi(tc_input, no_style_warnings=no_style_warnings)
+    type_errors = style_warnings = 0
+    for filename, diagnostics in all_results.items():
         rel = Path(filename).relative_to(root) if root else Path(filename)
-        if errors:
-            for err in errors:
-                print(str(err), file=sys.stderr)
-            type_errors += len(errors)
-        else:
+        real_issues = [d for d in diagnostics if not d.is_warning]
+        style_issues = [d for d in diagnostics if d.is_warning]
+        for d in diagnostics:
+            print(str(d), file=sys.stderr)
+        if not diagnostics:
             print(f'  {rel}: ok')
+        type_errors   += len(real_issues)
+        style_warnings += len(style_issues)
 
-    total = parse_errors + type_errors
-    if total:
-        print(f'\n{total} error(s) found.', file=sys.stderr)
+    total_hard = parse_errors + type_errors
+    if style_warnings and not no_style_warnings:
+        print(f'\n{style_warnings} style warning(s). Use --no-style-warnings to suppress.',
+              file=sys.stderr)
+    if total_hard:
+        print(f'\n{total_hard} error(s) found.', file=sys.stderr)
         sys.exit(1)
-    else:
+    elif not style_warnings:
         print(f'\nAll {len(src_files)} file(s) passed.')
 
 
@@ -390,7 +405,9 @@ def cmd_init(args):
     (project_dir / 'src').mkdir()
     (project_dir / 'assets').mkdir()
     (project_dir / 'assets' / 'sprites').mkdir()
+    (project_dir / 'assets' / 'models').mkdir()
     (project_dir / 'assets' / 'audio').mkdir()
+    (project_dir / 'assets' / 'fonts').mkdir()
 
     # ── pak.toml ──────────────────────────────────────────────────────────────
     (project_dir / 'pak.toml').write_text(f'''\
@@ -406,7 +423,9 @@ framebuffers = 3
 
 [assets]
 sprites = "assets/sprites/"
-audio = "assets/audio/"
+models  = "assets/models/"
+audio   = "assets/audio/"
+fonts   = "assets/fonts/"
 
 [dependencies]
 tiny3d = false
@@ -460,6 +479,10 @@ Makefile
     print(f"Created project '{name}'")
     print(f'  {name}/pak.toml')
     print(f'  {name}/src/main.pak')
+    print(f'  {name}/assets/sprites/')
+    print(f'  {name}/assets/models/')
+    print(f'  {name}/assets/audio/')
+    print(f'  {name}/assets/fonts/')
     print(f'  {name}/runtime/       (PakFS C runtime)')
     print()
     print('Next steps:')
@@ -515,11 +538,17 @@ def main():
     p_build.add_argument('-v', '--verbose', action='store_true')
     p_build.add_argument('--permissive', action='store_true',
                          help='Continue building even when type errors are present')
+    p_build.add_argument('--no-style-warnings', dest='no_style_warnings',
+                         action='store_true',
+                         help='Suppress naming-convention warnings (W001–W003)')
     p_build.set_defaults(func=cmd_build)
 
     # check
     p_check = sub.add_parser('check', help='Type-check without building')
     p_check.add_argument('files', nargs='*')
+    p_check.add_argument('--no-style-warnings', dest='no_style_warnings',
+                         action='store_true',
+                         help='Suppress naming-convention warnings (W001–W003)')
     p_check.set_defaults(func=cmd_check)
 
     # explain
@@ -531,6 +560,9 @@ def main():
     p_run = sub.add_parser('run', help='Build then `make run` (launches in ares)')
     p_run.add_argument('-v', '--verbose', action='store_true')
     p_run.add_argument('--permissive', action='store_true')
+    p_run.add_argument('--no-style-warnings', dest='no_style_warnings',
+                       action='store_true',
+                       help='Suppress naming-convention warnings (W001–W003)')
     p_run.set_defaults(func=cmd_run)
 
     # init

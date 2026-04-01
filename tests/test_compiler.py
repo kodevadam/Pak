@@ -1963,3 +1963,153 @@ class TestCLayout:
         c = codegen(src)
         assert 'Header' in c
         assert 'typedef struct' in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# @uncached annotation codegen
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestUncachedAnnotation:
+
+    def test_uncached_static_emits_uncachedaddr(self):
+        """@uncached static should declare a _pak_raw_ backing buffer and
+        expose a pointer via UncachedAddr() so the RDP sees writes immediately."""
+        src = textwrap.dedent('''
+            @uncached
+            static dma_buf: [4096]byte = undefined
+        ''')
+        c = codegen(src)
+        assert 'UncachedAddr' in c
+        assert '_pak_raw_dma_buf' in c
+        # The public name should be a pointer, not an array
+        assert 'dma_buf' in c
+
+    def test_uncached_static_has_alignment(self):
+        """@uncached static must be at least 16-byte aligned for DMA safety."""
+        src = textwrap.dedent('''
+            @uncached
+            static buf: [256]byte = undefined
+        ''')
+        c = codegen(src)
+        assert '__attribute__' in c
+        assert 'aligned' in c
+
+    def test_uncached_local_array_uses_malloc_uncached(self):
+        """@uncached local array should allocate via malloc_uncached."""
+        src = textwrap.dedent('''
+            fn do_dma() {
+                @uncached
+                let tmp: [1024]byte = undefined
+            }
+        ''')
+        c = codegen(src)
+        assert 'malloc_uncached' in c
+        assert 'tmp' in c
+
+    def test_uncached_comment_not_emitted_as_sole_annotation(self):
+        """The old '/* @uncached */' comment stub must no longer appear."""
+        src = textwrap.dedent('''
+            @uncached
+            static frame: [8192]byte = undefined
+        ''')
+        c = codegen(src)
+        # Must not fall back to the old comment-only behaviour
+        assert '/* @uncached */' not in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Naming convention warnings (W001–W003)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestNamingConventionWarnings:
+
+    def test_pascal_case_struct_no_warning(self):
+        """Correctly named struct produces no W001 warning."""
+        src = 'struct PlayerState { x: f32 }'
+        diags = check(src)
+        assert not any(d.code == 'W001' for d in diags)
+
+    def test_snake_case_struct_warns_w001(self):
+        """Incorrectly named struct (snake_case) produces W001."""
+        src = 'struct player_state { x: f32 }'
+        diags = check(src)
+        assert any(d.code == 'W001' for d in diags)
+
+    def test_w001_is_warning_not_error(self):
+        """W001 must have severity='warning', not 'error'."""
+        src = 'struct bad_name { x: f32 }'
+        diags = check(src)
+        w = next(d for d in diags if d.code == 'W001')
+        assert w.is_warning
+        assert w.severity == 'warning'
+
+    def test_pascal_case_enum_no_warning(self):
+        src = 'enum Direction { up, down }'
+        diags = check(src)
+        assert not any(d.code == 'W001' for d in diags)
+
+    def test_snake_case_enum_warns(self):
+        src = 'enum my_dir { up, down }'
+        diags = check(src)
+        assert any(d.code == 'W001' for d in diags)
+
+    def test_snake_case_fn_no_warning(self):
+        src = 'fn update_player(x: i32) {}'
+        diags = check(src)
+        assert not any(d.code == 'W002' for d in diags)
+
+    def test_camel_case_fn_warns_w002(self):
+        src = 'fn updatePlayer(x: i32) {}'
+        diags = check(src)
+        assert any(d.code == 'W002' for d in diags)
+
+    def test_w002_is_warning(self):
+        src = 'fn UpdatePlayer(x: i32) {}'
+        diags = check(src)
+        w = next(d for d in diags if d.code == 'W002')
+        assert w.is_warning
+
+    def test_upper_snake_const_no_warning(self):
+        src = 'const MAX_ENEMIES: i32 = 20'
+        diags = check(src)
+        assert not any(d.code == 'W003' for d in diags)
+
+    def test_lower_const_warns_w003(self):
+        src = 'const max_enemies: i32 = 20'
+        diags = check(src)
+        assert any(d.code == 'W003' for d in diags)
+
+    def test_w003_is_warning(self):
+        src = 'const maxEnemies: i32 = 20'
+        diags = check(src)
+        w = next(d for d in diags if d.code == 'W003')
+        assert w.is_warning
+
+    def test_no_style_warnings_suppresses_all(self):
+        """no_style_warnings=True must suppress W001/W002/W003."""
+        from pak.typechecker import typecheck
+        prog = parse('struct bad_name { x: f32 }\nconst lower: i32 = 1')
+        diags = typecheck(prog, no_style_warnings=True)
+        assert not any(d.code in ('W001', 'W002', 'W003') for d in diags)
+
+    def test_warnings_appear_in_str_as_warning_prefix(self):
+        """str(PakError) for a warning should say 'warning[...]' not 'error[...]'."""
+        src = 'struct bad_name { x: f32 }'
+        diags = check(src)
+        w = next(d for d in diags if d.code == 'W001')
+        assert str(w).startswith('warning[W001]')
+
+    def test_hint_suggests_correct_name(self):
+        """W001 hint should suggest a PascalCase rename."""
+        src = 'struct player_state { x: f32 }'
+        diags = check(src)
+        w = next(d for d in diags if d.code == 'W001')
+        assert 'PlayerState' in w.hint
+
+    def test_errors_still_use_error_prefix(self):
+        """Real errors (E-series) must still say 'error[...]'."""
+        src = 'entry { let x = unknown_var }'
+        diags = check(src)
+        e = next((d for d in diags if d.code == 'E010'), None)
+        if e:
+            assert str(e).startswith('error[E010]')

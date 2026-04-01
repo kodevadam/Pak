@@ -20,7 +20,7 @@ from typing import Optional, List, Dict, Any, Set
 from . import ast
 
 
-# ── Error codes ───────────────────────────────────────────────────────────────
+# ── Error / Warning codes ─────────────────────────────────────────────────────
 
 @dataclass
 class PakError:
@@ -30,10 +30,16 @@ class PakError:
     line: int
     col: int
     filename: str = ''
+    severity: str = 'error'   # 'error' | 'warning'
+
+    @property
+    def is_warning(self) -> bool:
+        return self.severity == 'warning'
 
     def __str__(self):
         loc = f'{self.filename}:{self.line}:{self.col}' if self.filename else f'{self.line}:{self.col}'
-        lines = [f'error[{self.code}]: {self.message}', f'  --> {loc}']
+        prefix = 'warning' if self.is_warning else 'error'
+        lines = [f'{prefix}[{self.code}]: {self.message}', f'  --> {loc}']
         if self.hint:
             lines.append(f'  help: {self.hint}')
         return '\n'.join(lines)
@@ -186,9 +192,10 @@ DMA_FNS = {
 
 
 class TypeChecker:
-    def __init__(self, env: TypeEnv, filename: str = ''):
+    def __init__(self, env: TypeEnv, filename: str = '', no_style_warnings: bool = False):
         self.env = env
         self.filename = filename
+        self.no_style_warnings = no_style_warnings
         self.errors: List[PakError] = []
         self.scope = Scope()
         self._current_fn: Optional[ast.FnDecl] = None
@@ -203,14 +210,83 @@ class TypeChecker:
             line=getattr(node, 'line', 0),
             col=getattr(node, 'col', 0),
             filename=self.filename,
+            severity='error',
+        ))
+
+    def warn(self, code: str, msg: str, node, hint: str = ''):
+        """Emit a style warning (suppressed by --no-style-warnings)."""
+        if self.no_style_warnings:
+            return
+        self.errors.append(PakError(
+            code=code, message=msg, hint=hint,
+            line=getattr(node, 'line', 0),
+            col=getattr(node, 'col', 0),
+            filename=self.filename,
+            severity='warning',
         ))
 
     # ── Pass 2: check bodies ─────────────────────────────────────────────────
 
     def check(self, program: ast.Program) -> List[PakError]:
         for decl in program.decls:
+            self._check_naming(decl)
             self._check_top(decl)
         return self.errors
+
+    # ── Naming convention checks (W001–W003) ──────────────────────────────────
+
+    # Compiled once at class level for performance
+    import re as _re
+    _PASCAL = _re.compile(r'^[A-Z][a-zA-Z0-9]*$')
+    _SNAKE  = _re.compile(r'^[a-z_][a-z0-9_]*$')
+    _UPPER  = _re.compile(r'^[A-Z][A-Z0-9_]*$')
+
+    def _check_naming(self, decl):
+        """Emit W001/W002/W003 warnings for naming-convention violations."""
+        if isinstance(decl, (ast.StructDecl, ast.EnumDecl, ast.VariantDecl)):
+            name = decl.name
+            if not self._PASCAL.match(name):
+                self.warn('W001',
+                          f"type '{name}' should be PascalCase",
+                          decl,
+                          hint=f"Rename to '{_to_pascal(name)}'")
+
+        elif isinstance(decl, ast.FnDecl):
+            name = decl.name
+            # Allow 'main' and single-letter type params
+            if name != 'main' and not self._SNAKE.match(name):
+                self.warn('W002',
+                          f"function '{name}' should be snake_case",
+                          decl,
+                          hint=f"Rename to '{_to_snake(name)}'")
+
+        elif isinstance(decl, ast.ConstDecl):
+            name = decl.name
+            if not self._UPPER.match(name):
+                self.warn('W003',
+                          f"constant '{name}' should be UPPER_SNAKE_CASE",
+                          decl,
+                          hint=f"Rename to '{_to_upper_snake(name)}'")
+
+        elif isinstance(decl, ast.StaticDecl):
+            name = decl.name
+            if not self._SNAKE.match(name):
+                self.warn('W002',
+                          f"static variable '{name}' should be snake_case",
+                          decl,
+                          hint=f"Rename to '{_to_snake(name)}'")
+
+        elif isinstance(decl, ast.LetDecl):
+            name = decl.name
+            if name != '_' and not self._SNAKE.match(name):
+                self.warn('W002',
+                          f"variable '{name}' should be snake_case",
+                          decl,
+                          hint=f"Rename to '{_to_snake(name)}'")
+
+        elif isinstance(decl, ast.ImplBlock):
+            for m in decl.methods:
+                self._check_naming(m)
 
     def _check_top(self, decl):
         if isinstance(decl, ast.FnDecl):
@@ -704,6 +780,27 @@ def _has_annotation(node, ann: str) -> bool:
     return ann in anns
 
 
+# ── Naming conversion helpers (used in warning hints) ─────────────────────────
+
+def _to_snake(name: str) -> str:
+    """Best-effort: convert a name to snake_case for use in warning hints."""
+    import re
+    s = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', name)
+    s = re.sub(r'([a-z\d])([A-Z])', r'\1_\2', s)
+    return s.lower()
+
+
+def _to_pascal(name: str) -> str:
+    """Best-effort: convert a name to PascalCase for use in warning hints."""
+    parts = name.replace('-', '_').split('_')
+    return ''.join(p.capitalize() for p in parts if p)
+
+
+def _to_upper_snake(name: str) -> str:
+    """Best-effort: convert a name to UPPER_SNAKE_CASE for use in warning hints."""
+    return _to_snake(name).upper()
+
+
 def _type_str(typ) -> str:
     if isinstance(typ, ast.TypeName):
         return typ.name
@@ -719,19 +816,21 @@ def _type_str(typ) -> str:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def typecheck(program: ast.Program, filename: str = '') -> List[PakError]:
-    """Run the type checker on a parsed program. Returns list of errors."""
+def typecheck(program: ast.Program, filename: str = '',
+              no_style_warnings: bool = False) -> List[PakError]:
+    """Run the type checker on a parsed program. Returns list of errors/warnings."""
     env = TypeEnv()
     env.collect(program)
-    checker = TypeChecker(env, filename)
+    checker = TypeChecker(env, filename, no_style_warnings=no_style_warnings)
     return checker.check(program)
 
 
-def typecheck_multi(programs: List[tuple]) -> Dict[str, List[PakError]]:
+def typecheck_multi(programs: List[tuple],
+                    no_style_warnings: bool = False) -> Dict[str, List[PakError]]:
     """
     Type-check multiple programs sharing a common environment.
     programs: list of (filename, ast.Program)
-    Returns {filename: [errors]}
+    Returns {filename: [errors/warnings]}
     """
     env = TypeEnv()
     for _, prog in programs:
@@ -739,6 +838,6 @@ def typecheck_multi(programs: List[tuple]) -> Dict[str, List[PakError]]:
 
     results = {}
     for filename, prog in programs:
-        checker = TypeChecker(env, filename)
+        checker = TypeChecker(env, filename, no_style_warnings=no_style_warnings)
         results[filename] = checker.check(prog)
     return results

@@ -1935,14 +1935,43 @@ class Codegen:
         return '\n'.join(lines)
 
     def gen_static_decl(self, s: ast.StaticDecl) -> str:
+        is_uncached = '@uncached' in (s.annotations or [])
+
+        if is_uncached:
+            # @uncached static: declare a cached backing array, then expose a
+            # pointer to its KSEG1 (uncached) alias via UncachedAddr().
+            # This makes every read/write through `name` bypass the CPU cache,
+            # so the RDP / DMA sees the data immediately without a writeback.
+            raw_name = f'_pak_raw_{s.name}'
+            align_attr = '__attribute__((aligned(16)))'
+            for ann in (s.annotations or []):
+                if '@aligned' in ann:
+                    n = ann[ann.index('(')+1:ann.index(')')]
+                    align_attr = f'__attribute__((aligned({n})))'
+            if s.type:
+                raw_decl = self.gen_array_decl(raw_name, s.type)
+                c_type   = self.gen_type(s.type)
+                # Determine element type for the pointer alias
+                if isinstance(s.type, ast.TypeArray):
+                    ptr_type = self.gen_type(s.type.inner)
+                else:
+                    ptr_type = c_type
+            else:
+                raw_decl = f'uint8_t {raw_name}[0]'
+                ptr_type = 'uint8_t'
+                c_type   = 'uint8_t'
+            lines = [
+                f'static {align_attr} {raw_decl};',
+                f'static {ptr_type} * const {s.name} = ({ptr_type} *)UncachedAddr({raw_name});',
+            ]
+            return '\n'.join(lines)
+
         decl = self.gen_array_decl(s.name, s.type) if s.type else f'__auto_type {s.name}'
-        if '@aligned' in ' '.join(s.annotations):
-            for ann in s.annotations:
+        if '@aligned' in ' '.join(s.annotations or []):
+            for ann in (s.annotations or []):
                 if '@aligned' in ann:
                     n = ann[ann.index('(')+1:ann.index(')')]
                     decl = f'__attribute__((aligned({n}))) ' + decl
-        if '@uncached' in s.annotations:
-            decl = '/* @uncached */ ' + decl
         if s.value and not isinstance(s.value, ast.UndefinedLit):
             return f'static {decl} = {self.gen_expr(s.value)};'
         return f'static {decl};'
@@ -2015,6 +2044,15 @@ class Codegen:
         if '@dma_safe' in annotations:
             prefix = '__attribute__((aligned(16))) ' + prefix
         if '@uncached' in annotations:
+            # For local @uncached arrays: allocate from heap via malloc_uncached
+            # so the memory lives in the RDRAM uncached segment (KSEG1).
+            if s.type and isinstance(s.type, ast.TypeArray):
+                elem_t  = self.gen_type(s.type.inner)
+                n_elems = self.gen_expr(s.type.size)
+                self.scope_set(s.name, ast.TypePointer(inner=s.type.inner))
+                return (f'{pad}{elem_t} * const {s.name} = '
+                        f'({elem_t} *)malloc_uncached({n_elems} * sizeof({elem_t}));')
+            # For pointer types, defer to value expression (user uses malloc_uncached)
             prefix = '/* @uncached */ ' + prefix
 
         if s.type:
