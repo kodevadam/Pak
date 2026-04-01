@@ -1,7 +1,128 @@
 """Pak → C code generator."""
 
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Callable
 from . import ast
+
+
+# ── Module → C API mapping ────────────────────────────────────────────────────
+# Maps "module.function" → C function name (or callable that takes args list
+# and returns a full C call string).
+
+def _passthrough(fn: str):
+    """Map directly to a C function name."""
+    return fn
+
+def _method_call(c_fn: str, first_arg_addr: bool = False):
+    """Generate a C function call, optionally taking address of first arg."""
+    def _gen(args):
+        if first_arg_addr and args:
+            return f'{c_fn}(&{args[0]}, {", ".join(args[1:])})'
+        return f'{c_fn}({", ".join(args)})'
+    return _gen
+
+# (module, function) → C function name string OR callable(args) → str
+MODULE_API: dict = {
+    # n64.display
+    ('display', 'init'):           'display_init',
+    ('display', 'get'):            'display_get',
+    ('display', 'show'):           'display_show',
+    ('display', 'close'):          'display_close',
+
+    # n64.controller / joypad
+    ('controller', 'init'):        'joypad_init',
+    ('controller', 'read'):        lambda args: f'joypad_get_status({args[0]})' if args else 'joypad_get_status(0)',
+    ('controller', 'poll'):        'joypad_poll',
+
+    # n64.rdpq
+    ('rdpq', 'init'):              'rdpq_init',
+    ('rdpq', 'close'):             'rdpq_close',
+    ('rdpq', 'attach'):            'rdpq_attach',
+    ('rdpq', 'attach_clear'):      'rdpq_attach_clear',
+    ('rdpq', 'detach'):            'rdpq_detach',
+    ('rdpq', 'detach_show'):       'rdpq_detach_show',
+    ('rdpq', 'set_mode_standard'): 'rdpq_set_mode_standard',
+    ('rdpq', 'set_mode_copy'):     'rdpq_set_mode_copy',
+    ('rdpq', 'set_mode_fill'):     'rdpq_set_mode_fill',
+    ('rdpq', 'fill_rectangle'):    'rdpq_fill_rectangle',
+    ('rdpq', 'sync_full'):         'rdpq_sync_full',
+    ('rdpq', 'sync_pipe'):         'rdpq_sync_pipe',
+    ('rdpq', 'sync_tile'):         'rdpq_sync_tile',
+    ('rdpq', 'sync_load'):         'rdpq_sync_load',
+    ('rdpq', 'set_scissor'):       'rdpq_set_scissor',
+
+    # n64.sprite
+    ('sprite', 'load'):            'sprite_load',
+    ('sprite', 'blit'):            lambda args: (
+        f'rdpq_sprite_blit({args[0]}, {args[1]}, {args[2]}, NULL)'
+        if len(args) >= 3 else f'rdpq_sprite_blit({", ".join(args)}, NULL)'
+    ),
+
+    # n64.timer
+    ('timer', 'init'):             'timer_init',
+    ('timer', 'delta'):            lambda args: '_pak_delta_time()',
+    ('timer', 'get_ticks'):        'get_ticks',
+
+    # n64.audio
+    ('audio', 'init'):             'audio_init',
+    ('audio', 'close'):            'audio_close',
+    ('audio', 'get_buffer'):       'audio_get_buffer',
+
+    # n64.debug
+    ('debug', 'log'):              'debugf',
+    ('debug', 'assert'):           'assert',
+
+    # n64.dma
+    ('dma', 'read'):               'dma_read',
+    ('dma', 'write'):              'dma_write',
+    ('dma', 'wait'):               'dma_wait',
+
+    # n64.cache
+    ('cache', 'writeback'):        'data_cache_hit_writeback',
+    ('cache', 'invalidate'):       'data_cache_hit_invalidate',
+    ('cache', 'writeback_inv'):    'data_cache_hit_writeback_invalidate',
+
+    # t3d.core
+    ('t3d', 'init'):               't3d_init',
+    ('t3d', 'destroy'):            't3d_destroy',
+    ('t3d', 'frame_start'):        't3d_frame_start',
+    ('t3d', 'frame_end'):          'rspq_block_run',
+    ('t3d', 'screen_projection'):  't3d_screen_projection',
+    ('t3d', 'viewport_create'):    't3d_viewport_create',
+    ('t3d', 'viewport_set_projection'): 't3d_viewport_set_projection',
+
+    # t3d.model
+    ('t3d', 'model_load'):         't3d_model_load',
+    ('t3d', 'model_free'):         't3d_model_free',
+    ('t3d', 'model_draw'):         't3d_model_draw',
+
+    # t3d.math
+    ('t3d', 'mat4_identity'):      lambda args: f't3d_mat4_identity({_addr(args, 0)})',
+    ('t3d', 'mat4_rotate_y'):      lambda args: f't3d_mat4_rotate({_addr(args, 0)}, &(T3DVec3){{{{0,1,0}}}}, {args[1]})',
+    ('t3d', 'mat4_rotate_x'):      lambda args: f't3d_mat4_rotate({_addr(args, 0)}, &(T3DVec3){{{{1,0,0}}}}, {args[1]})',
+    ('t3d', 'mat4_rotate_z'):      lambda args: f't3d_mat4_rotate({_addr(args, 0)}, &(T3DVec3){{{{0,0,1}}}}, {args[1]})',
+    ('t3d', 'mat4_translate'):     lambda args: f't3d_mat4_translate({_addr(args, 0)}, {args[1]}, {args[2]}, {args[3]})',
+    ('t3d', 'mat4_scale'):         lambda args: f't3d_mat4_scale({_addr(args, 0)}, {args[1]}, {args[2]}, {args[3]})',
+
+    # t3d.light
+    ('t3d', 'light_set_ambient'):  't3d_light_set_ambient',
+    ('t3d', 'light_set_directional'): 't3d_light_set_directional',
+
+    # t3d.viewport
+    ('t3d', 'viewport_attach'):    't3d_viewport_attach',
+    ('t3d', 'viewport_set_fov'):   't3d_viewport_set_fov',
+    ('t3d', 'set_camera'):         't3d_set_camera',
+    ('t3d', 'look_at'):            't3d_look_at',
+}
+
+
+def _addr(args, i):
+    """Return &args[i] if not already a pointer expression."""
+    if i < len(args):
+        a = args[i]
+        if a.startswith('&') or a.startswith('*'):
+            return a
+        return f'&{a}'
+    return 'NULL'
 
 
 # ── Type mappings ─────────────────────────────────────────────────────────────
@@ -77,6 +198,30 @@ class Codegen:
         self.fn_names: List[str] = []
         # Map variant_name → enum_name for dot-access resolution
         self.enum_variants: dict = {}  # variant_case → enum_name
+        # Scope stack: list of {name: type_node} for pointer-member access
+        self.scopes: List[dict] = [{}]
+
+    # ── Scope helpers ─────────────────────────────────────────────────────────
+
+    def scope_push(self):
+        self.scopes.append({})
+
+    def scope_pop(self):
+        self.scopes.pop()
+
+    def scope_set(self, name: str, typ):
+        self.scopes[-1][name] = typ
+
+    def scope_get(self, name: str):
+        for s in reversed(self.scopes):
+            if name in s:
+                return s[name]
+        return None
+
+    def is_pointer(self, name: str) -> bool:
+        """Return True if the variable is a pointer type."""
+        t = self.scope_get(name)
+        return isinstance(t, ast.TypePointer)
 
     def emit(self, line: str = ''):
         if line:
@@ -155,15 +300,21 @@ class Codegen:
             return e.name
         if isinstance(e, ast.DotAccess):
             obj_str = self.gen_expr(e.obj)
-            # If the object is an enum type name, generate EnumName_variant
-            if isinstance(e.obj, ast.Ident) and e.obj.name in self.enum_variants.values():
-                return f'{obj_str}_{e.field}'
-            # Check if this looks like an enum access (obj is a known type name)
             if isinstance(e.obj, ast.Ident):
-                # Could be enum dot access: Direction.up → Direction_up
-                # Check if field is a known enum variant
+                n = e.obj.name
+                # Enum type name access: Direction.up → Direction_up
+                if n in self.enum_variants.values():
+                    return f'{obj_str}_{e.field}'
+                # Enum variant shortcut (field is a known variant)
                 if e.field in self.enum_variants:
                     return f'{obj_str}_{e.field}'
+                # Module namespace — not a variable, keep as-is (resolved in Call)
+                if (n, e.field) in MODULE_API:
+                    return f'{obj_str}.{e.field}'  # placeholder; Call handles it
+                # Pointer variable: p.field → p->field
+                if self.is_pointer(n):
+                    return f'{obj_str}->{e.field}'
+            # Chained access on a non-ident expression
             return f'{obj_str}.{e.field}'
         if isinstance(e, ast.IndexAccess):
             return f'{self.gen_expr(e.obj)}[{self.gen_expr(e.index)}]'
@@ -171,10 +322,21 @@ class Codegen:
             start = self.gen_expr(e.start) if e.start else '0'
             return f'&{self.gen_expr(e.obj)}[{start}]'
         if isinstance(e, ast.NamedArg):
-            return f'/* {e.name}: */ {self.gen_expr(e.value)}'
+            return self.gen_expr(e.value)
         if isinstance(e, ast.Call):
+            args_strs = [self.gen_expr(a) for a in e.args]
+            # Module API call: module.function(args) → C API
+            if isinstance(e.func, ast.DotAccess) and isinstance(e.func.obj, ast.Ident):
+                mod = e.func.obj.name
+                fn = e.func.field
+                key = (mod, fn)
+                if key in MODULE_API:
+                    mapping = MODULE_API[key]
+                    if callable(mapping):
+                        return mapping(args_strs)
+                    return f'{mapping}({", ".join(args_strs)})'
             func = self.gen_expr(e.func)
-            args = ', '.join(self.gen_expr(a) for a in e.args)
+            args = ', '.join(args_strs)
             return f'{func}({args})'
         if isinstance(e, ast.StructLit):
             fields = ', '.join(f'.{name} = {self.gen_expr(val)}' for name, val in e.fields)
@@ -259,6 +421,18 @@ class Codegen:
         # PakFS header if assets are present
         if self.assets:
             out_lines.append('#include <pakfs.h>')
+
+        # Timer helper if n64.timer is used
+        if 'n64.timer' in self.uses:
+            out_lines.append('')
+            out_lines.append('static uint32_t _pak_last_tick = 0;')
+            out_lines.append('static inline float _pak_delta_time(void) {')
+            out_lines.append('    uint32_t now = TICKS_READ();')
+            out_lines.append('    float dt = (float)TIMER_MICROS(now - _pak_last_tick) / 1000000.0f;')
+            out_lines.append('    _pak_last_tick = now;')
+            out_lines.append('    return dt;')
+            out_lines.append('}')
+
         out_lines.append('')
 
         # Asset declarations
@@ -404,19 +578,25 @@ class Codegen:
             return '\n'.join(lines)
 
         lines.append(f'{ret} {name}({param_str}) {{')
+        self.scope_push()
+        for p in fn.params:
+            self.scope_set(p.name, p.type)
         for stmt in fn.body.stmts:
             stmt_str = self.gen_stmt(stmt, indent=1)
             if stmt_str:
                 lines.append(stmt_str)
+        self.scope_pop()
         lines.append('}')
         return '\n'.join(lines)
 
     def gen_entry(self, entry: ast.EntryBlock) -> str:
         lines = ['int main(void) {']
+        self.scope_push()
         for stmt in entry.body.stmts:
             s = self.gen_stmt(stmt, indent=1)
             if s:
                 lines.append(s)
+        self.scope_pop()
         lines.append('    return 0;')
         lines.append('}')
         return '\n'.join(lines)
@@ -502,8 +682,12 @@ class Codegen:
 
         if s.type:
             decl = self.gen_array_decl(s.name, s.type)
+            self.scope_set(s.name, s.type)
         else:
             decl = f'__auto_type {s.name}'
+            # Infer pointer type from value if possible
+            if isinstance(s.value, ast.AddrOf):
+                self.scope_set(s.name, ast.TypePointer(inner=ast.TypeName(name='auto')))
 
         if s.value is not None and not isinstance(s.value, ast.UndefinedLit):
             val = self.gen_expr(s.value)
