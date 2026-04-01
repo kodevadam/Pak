@@ -60,6 +60,10 @@ class TT(Enum):
     ASM = auto()
     OFFSETOF = auto()
     ALIGNOF = auto()
+    TRAIT = auto()
+    DYN = auto()
+    ALLOC = auto()
+    FREE = auto()
 
     # Annotations
     ANNOTATION = auto()  # @something
@@ -90,6 +94,7 @@ class TT(Enum):
     STAR = auto()      # *
     SLASH = auto()     # /
     PERCENT = auto()   # %
+    PERCENT_EQ = auto() # %=
     AMP = auto()       # &
     PIPE = auto()      # |
     CARET = auto()     # ^
@@ -159,6 +164,10 @@ KEYWORDS = {
     'offsetof': TT.OFFSETOF,
     'align_of': TT.ALIGNOF,  # spec alias
     'alignof': TT.ALIGNOF,
+    'trait': TT.TRAIT,
+    'dyn': TT.DYN,
+    'alloc': TT.ALLOC,
+    'free': TT.FREE,
     '_': TT.UNDERSCORE,
 }
 
@@ -289,6 +298,14 @@ class Lexer:
 
             # Numbers
             elif ch.isdigit() or (ch == '.' and self.peek().isdigit()):
+                # If '.' follows an expression-ending token (identifier, closing bracket,
+                # etc.) it is a field-access dot, not the start of a float literal.
+                # e.g. t.0 should be DOT + INT(0), not FLOAT('.')
+                if ch == '.' and tokens and tokens[-1].type in (
+                        TT.IDENT, TT.INT, TT.FLOAT, TT.RPAREN, TT.RBRACKET,
+                        TT.RBRACE, TT.TRUE, TT.FALSE, TT.SELF):
+                    tok(TT.DOT)
+                    continue
                 num = [ch]
                 is_float = (ch == '.')
                 is_hex = False
@@ -371,7 +388,11 @@ class Lexer:
                     tok(TT.CARET_EQ, '^=')
                 else:
                     tok(TT.CARET)
-            elif ch == '%': tok(TT.PERCENT)
+            elif ch == '%':
+                if self.match('='):
+                    tok(TT.PERCENT_EQ, '%=')
+                else:
+                    tok(TT.PERCENT)
             elif ch == '.':
                 if self.match('.'):
                     tok(TT.DOTDOT, '..')

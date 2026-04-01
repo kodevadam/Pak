@@ -55,30 +55,45 @@ class TypeEnv:
         self.enums:    Dict[str, ast.EnumDecl]     = {}
         self.variants: Dict[str, ast.VariantDecl]  = {}
         self.fns:      Dict[str, ast.FnDecl]       = {}
+        self.traits:   Dict[str, ast.TraitDecl]    = {}
+        # trait_impls: (type_name, trait_name) → ImplTraitBlock
+        self.trait_impls: Dict[tuple, ast.ImplTraitBlock] = {}
         # variant_name → enum/variant name (for exhaustive-match lookup)
         self.enum_cases:    Dict[str, str] = {}  # case → EnumDecl name
         self.variant_cases: Dict[str, str] = {}  # case → VariantDecl name
 
     def collect(self, program: ast.Program):
         for decl in program.decls:
-            if isinstance(decl, ast.StructDecl):
-                self.structs[decl.name] = decl
-            elif isinstance(decl, ast.EnumDecl):
-                self.enums[decl.name] = decl
-                for v in decl.variants:
-                    self.enum_cases[v.name] = decl.name
-            elif isinstance(decl, ast.VariantDecl):
-                self.variants[decl.name] = decl
-                for c in decl.cases:
-                    self.variant_cases[c.name] = decl.name
-            elif isinstance(decl, ast.FnDecl):
-                self.fns[decl.name] = decl
-            elif isinstance(decl, ast.ImplBlock):
-                for m in decl.methods:
-                    prefixed = f'{decl.type_name}_{m.name}'
-                    self.fns[prefixed] = m
-            elif isinstance(decl, (ast.ConstDecl, ast.ExternConst)):
-                pass  # names registered in _check_top
+            self._collect_one(decl)
+
+    def _collect_one(self, decl):
+        if isinstance(decl, ast.StructDecl):
+            self.structs[decl.name] = decl
+        elif isinstance(decl, ast.EnumDecl):
+            self.enums[decl.name] = decl
+            for v in decl.variants:
+                self.enum_cases[v.name] = decl.name
+        elif isinstance(decl, ast.VariantDecl):
+            self.variants[decl.name] = decl
+            for c in decl.cases:
+                self.variant_cases[c.name] = decl.name
+        elif isinstance(decl, ast.FnDecl):
+            self.fns[decl.name] = decl
+        elif isinstance(decl, ast.ImplBlock):
+            for m in decl.methods:
+                prefixed = f'{decl.type_name}_{m.name}'
+                self.fns[prefixed] = m
+        elif isinstance(decl, ast.ImplTraitBlock):
+            self.trait_impls[(decl.type_name, decl.trait_name)] = decl
+            for m in decl.methods:
+                prefixed = f'{decl.type_name}_{m.name}'
+                self.fns[prefixed] = m
+        elif isinstance(decl, ast.TraitDecl):
+            self.traits[decl.name] = decl
+        elif isinstance(decl, ast.CfgBlock):
+            self._collect_one(decl.decl)
+        elif isinstance(decl, (ast.ConstDecl, ast.ExternConst)):
+            pass  # names registered in _check_top
 
     def struct_fields(self, name: str) -> Optional[Dict[str, Any]]:
         """Return {field_name: type} for a struct, or None."""
@@ -300,6 +315,24 @@ class TypeChecker:
         elif isinstance(decl, ast.ImplBlock):
             for m in decl.methods:
                 self._check_fn(m)
+        elif isinstance(decl, ast.ImplTraitBlock):
+            # Validate each method implementation against the trait signature
+            trait = self.env.traits.get(decl.trait_name)
+            if trait:
+                trait_method_names = {m.name for m in trait.methods}
+                for m in decl.methods:
+                    if m.name not in trait_method_names:
+                        self.err('E601',
+                                 f"method '{m.name}' is not declared in trait '{decl.trait_name}'",
+                                 m,
+                                 hint=f"Remove this method or add it to trait '{decl.trait_name}'")
+            for m in decl.methods:
+                self._check_fn(m)
+        elif isinstance(decl, ast.TraitDecl):
+            pass  # trait bodies are just signatures — nothing to check
+        elif isinstance(decl, ast.CfgBlock):
+            self._check_naming(decl.decl)
+            self._check_top(decl.decl)
         elif isinstance(decl, ast.ConstDecl):
             if decl.value:
                 self._check_expr(decl.value)
@@ -471,6 +504,9 @@ class TypeChecker:
                 # Could be an enum type name — allow it
                 if name in self.env.enums or name in self.env.variants or name in self.env.structs:
                     return
+                # Could be a trait name
+                if name in self.env.traits:
+                    return
                 # Could be a function name
                 if name in self.env.fns:
                     return
@@ -593,6 +629,20 @@ class TypeChecker:
                 self.scope.declare(p.name, p.type)
             self._check_block_stmts(expr.body.stmts)
             self.scope.pop()
+
+        elif isinstance(expr, ast.TupleLit):
+            for el in expr.elements:
+                self._check_expr(el)
+
+        elif isinstance(expr, ast.TupleAccess):
+            self._check_expr(expr.obj)
+
+        elif isinstance(expr, ast.AllocExpr):
+            if expr.count is not None:
+                self._check_expr(expr.count)
+
+        elif isinstance(expr, ast.FreeExpr):
+            self._check_expr(expr.ptr)
 
     # ── Field access checking ─────────────────────────────────────────────────
 

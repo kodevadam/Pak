@@ -691,6 +691,15 @@ class Codegen:
         self._closures: List[tuple] = []
         # Const values visible to all scopes (name → expr string)
         self.const_values: dict = {}
+        # Trait declarations: name → TraitDecl
+        self.trait_decls: dict = {}
+        # Tuple typedefs: deduped list of (typedef_name, c_types_list)
+        self._tuple_typedefs: List[tuple] = []
+        self._tuple_typedef_names: set = set()
+        # Vec typedefs (dynamic vector backed by malloc)
+        self._vec_typedefs: List[tuple] = []
+        self._vec_typedef_names: set = set()
+        self._vec_used: bool = False
 
     # ── Scope helpers ─────────────────────────────────────────────────────────
 
@@ -791,9 +800,56 @@ class Codegen:
             self._slice_typedefs.append((typedef_name, c_inner))
         return typedef_name
 
+    def _tuple_typedef(self, c_types: List[str]) -> str:
+        """Register and return a C typedef name for a tuple type."""
+        safe = '_'.join(
+            ct.replace(' ', '_').replace('*', 'p').replace(',', '').replace('(', '').replace(')', '')
+            for ct in c_types
+        )
+        typedef_name = f'PakTuple{len(c_types)}_{safe}'
+        if typedef_name not in self._tuple_typedef_names:
+            self._tuple_typedef_names.add(typedef_name)
+            self._tuple_typedefs.append((typedef_name, list(c_types)))
+        return typedef_name
+
+    def _vec_typedef(self, elem_c_type: str) -> str:
+        """Register and return a C typedef name for Vec(T)."""
+        safe = elem_c_type.replace(' ', '_').replace('*', 'p').replace(',', '')
+        typedef_name = f'_PakVec_{safe}'
+        if typedef_name not in self._vec_typedef_names:
+            self._vec_typedef_names.add(typedef_name)
+            self._vec_typedefs.append((typedef_name, elem_c_type))
+            self._vec_used = True
+        return typedef_name
+
+    def _emit_tuple_typedefs(self) -> List[str]:
+        lines = []
+        for typedef_name, c_types in self._tuple_typedefs:
+            lines.append(f'typedef struct {{')
+            for i, ct in enumerate(c_types):
+                lines.append(f'    {ct} f{i};')
+            lines.append(f'}} {typedef_name};')
+        return lines
+
+    def _emit_vec_typedefs(self) -> List[str]:
+        lines = []
+        for typedef_name, elem_c_type in self._vec_typedefs:
+            lines.append(f'typedef struct {{')
+            lines.append(f'    {elem_c_type} *data;')
+            lines.append(f'    int32_t len;')
+            lines.append(f'    int32_t cap;')
+            lines.append(f'}} {typedef_name};')
+        return lines
+
     def gen_type(self, t) -> str:
         if t is None:
             return 'void'
+        if isinstance(t, ast.TypeTuple):
+            c_types = [self.gen_type(elem) for elem in t.elements]
+            return self._tuple_typedef(c_types)
+        if isinstance(t, ast.TypeDynTrait):
+            # Trait object struct is named after the trait
+            return t.name
         if isinstance(t, ast.TypeVolatile):
             inner = self.gen_type(t.inner)
             # volatile T* vs volatile T — if inner ends with * it's a volatile pointer
@@ -806,6 +862,9 @@ class Codegen:
                 return t.name
             return PRIMITIVE_TYPES.get(t.name, t.name)
         if isinstance(t, ast.TypePointer):
+            # *dyn Trait → just the trait-object struct (already a fat pointer)
+            if isinstance(t.inner, ast.TypeDynTrait):
+                return t.inner.name
             inner = self.gen_type(t.inner)
             return f'{inner} *'
         if isinstance(t, ast.TypeSlice):
@@ -830,6 +889,10 @@ class Codegen:
             # Built-in containers: FixedList(T, N), RingBuffer(T, N), FixedMap(K, V, N)
             if t.name in ('FixedList', 'RingBuffer', 'FixedMap', 'Pool'):
                 return self._container_typedef(t)
+            # Dynamic vector: Vec(T)
+            if t.name == 'Vec' and t.args:
+                elem_type = self.gen_type(t.args[0])
+                return self._vec_typedef(elem_type)
             # Generic struct: Foo<i32, Str> → Foo_i32_Str
             c_args = '_'.join(
                 (self.gen_expr(a) if isinstance(a, ast.IntLit) else
@@ -1043,6 +1106,20 @@ class Codegen:
                             self_arg = f'&{obj_name}'
                         all_args = [self_arg] + args_strs
                         return f'{c_fn}({", ".join(all_args)})'
+            # Trait-object method dispatch: d.method(args) → d.vtable->method(d.self, args)
+            if isinstance(e.func, ast.DotAccess) and isinstance(e.func.obj, ast.Ident):
+                obj_name = e.func.obj.name
+                method_name = e.func.field
+                obj_type = self.scope_get(obj_name)
+                trait_type_name = None
+                if isinstance(obj_type, ast.TypeName) and obj_type.name in self.trait_decls:
+                    trait_type_name = obj_type.name
+                elif isinstance(obj_type, ast.TypeDynTrait):
+                    trait_type_name = obj_type.name
+                if trait_type_name:
+                    vtable_args = [f'{obj_name}.self'] + args_strs
+                    return f'({obj_name}.vtable->{method_name})({", ".join(vtable_args)})'
+
             # Built-in instance method dispatch (Vec3/Mat4/numeric/slice/container)
             if isinstance(e.func, ast.DotAccess):
                 obj_expr = e.func.obj
@@ -1166,6 +1243,20 @@ class Codegen:
             return self._gen_asm_expr(e)
         if isinstance(e, ast.Closure):
             return self._gen_closure(e)
+        if isinstance(e, ast.TupleLit):
+            return self._gen_tuple_lit(e)
+        if isinstance(e, ast.TupleAccess):
+            obj = self.gen_expr(e.obj)
+            return f'({obj}).f{e.index}'
+        if isinstance(e, ast.AllocExpr):
+            c_type = self.gen_type(e.type_node)
+            if e.count is not None:
+                count = self.gen_expr(e.count)
+                return f'({c_type} *)malloc(sizeof({c_type}) * (size_t)({count}))'
+            return f'({c_type} *)malloc(sizeof({c_type}))'
+        if isinstance(e, ast.FreeExpr):
+            ptr = self.gen_expr(e.ptr)
+            return f'free({ptr})'
         return '/* unknown expr */'
 
     def _gen_asm_expr(self, e: ast.AsmExpr) -> str:
@@ -1179,6 +1270,30 @@ class Codegen:
                 parts.append(f' : {clob}')
         parts.append(')')
         return ''.join(parts)
+
+    def _infer_c_type_for_tuple_elem(self, e) -> str:
+        """Best-effort: return C type string for a tuple element expression."""
+        t = self._expr_type(e)
+        if t is not None:
+            return self.gen_type(t)
+        if isinstance(e, ast.IntLit):
+            return 'int32_t'
+        if isinstance(e, ast.FloatLit):
+            return 'float'
+        if isinstance(e, ast.BoolLit):
+            return 'bool'
+        if isinstance(e, ast.StringLit):
+            return 'const char *'
+        if isinstance(e, ast.TupleLit):
+            inner = [self._infer_c_type_for_tuple_elem(el) for el in e.elements]
+            return self._tuple_typedef(inner)
+        return 'void *'
+
+    def _gen_tuple_lit(self, e: ast.TupleLit) -> str:
+        c_types = [self._infer_c_type_for_tuple_elem(el) for el in e.elements]
+        typedef_name = self._tuple_typedef(c_types)
+        fields = ', '.join(f'.f{i} = {self.gen_expr(el)}' for i, el in enumerate(e.elements))
+        return f'({typedef_name}){{{fields}}}'
 
     def _gen_closure(self, e: ast.Closure) -> str:
         """Emit a non-capturing closure as a static function + function pointer.
@@ -1484,6 +1599,75 @@ class Codegen:
             if method == 'get' and a:
                 return f'pak_map_get(&({obj}), {cap}, {a[0]})'
 
+        # ── Vec(T) dynamic vector methods ─────────────────────────────────────
+        if isinstance(obj_type, ast.TypeGeneric) and obj_type.name == 'Vec':
+            self._vec_used = True
+            if method == 'init':
+                return f'memset(&({obj}), 0, sizeof({obj}))'
+            if method == 'push' and a:
+                return (f'_PAK_VEC_PUSH(&({obj}), ({a[0]}))')
+            if method == 'pop':
+                return (f'(({obj}).len > 0 ? ({obj}).data[--({obj}).len] : ({obj}).data[0])')
+            if method == 'get' and a:
+                return f'({obj}).data[{a[0]}]'
+            if method == 'len' and not a:
+                return f'({obj}).len'
+            if method == 'is_empty' and not a:
+                return f'(({obj}).len == 0)'
+            if method == 'clear' and not a:
+                return f'(({obj}).len = 0)'
+            if method == 'reserve' and a:
+                elem_type = self.gen_type(obj_type.args[0]) if obj_type.args else 'void *'
+                return (f'(({obj}).cap < ({a[0]}) ? '
+                        f'(({obj}).data = ({elem_type} *)realloc(({obj}).data, '
+                        f'(size_t)({a[0]}) * sizeof(*({obj}).data)), '
+                        f'({obj}).cap = ({a[0]}), (void)0) : (void)0)')
+            if method == 'free' and not a:
+                return (f'({{ free(({obj}).data); ({obj}).data = NULL; '
+                        f'({obj}).len = ({obj}).cap = 0; }})')
+
+        # ── CStr / Str / PakStr string methods ───────────────────────────────
+        is_cstr = c_type in ('const char *', 'char *') or (
+            isinstance(obj_type, ast.TypeName) and obj_type.name in ('CStr', 'c_char'))
+        is_pakstr = c_type == 'PakStr' or (
+            isinstance(obj_type, ast.TypeName) and obj_type.name in ('Str', 'PakStr'))
+
+        if is_cstr:
+            if method == 'len' and not a:
+                return f'(int32_t)strlen({obj})'
+            if method == 'contains' and len(a) == 1:
+                return f'(strstr({obj}, {a[0]}) != NULL)'
+            if method == 'starts_with' and len(a) == 1:
+                return f'(strncmp({obj}, {a[0]}, strlen({a[0]})) == 0)'
+            if method == 'ends_with' and len(a) == 1:
+                return (f'(strlen({obj}) >= strlen({a[0]}) && '
+                        f'strcmp(({obj}) + strlen({obj}) - strlen({a[0]}), {a[0]}) == 0)')
+            if method == 'eq' and len(a) == 1:
+                return f'(strcmp({obj}, {a[0]}) == 0)'
+            if method == 'cmp' and len(a) == 1:
+                return f'strcmp({obj}, {a[0]})'
+            if method == 'is_empty' and not a:
+                return f'(({obj})[0] == \'\\0\')'
+            if method == 'as_bytes' and not a:
+                return f'(const uint8_t *)({obj})'
+            if method == 'to_pakstr' and not a:
+                return f'pak_str_from_cstr({obj})'
+
+        if is_pakstr:
+            if method == 'len' and not a:
+                return f'({obj}).len'
+            if method == 'data' and not a:
+                return f'({obj}).data'
+            if method == 'eq' and len(a) == 1:
+                return f'pak_str_eq({obj}, {a[0]})'
+            if method == 'is_empty' and not a:
+                return f'(({obj}).len == 0)'
+            if method == 'as_cstr' and not a:
+                return f'({obj}).data'
+            if method == 'contains' and len(a) == 1:
+                return (f'(memmem(({obj}).data, (size_t)({obj}).len, '
+                        f'({a[0]}).data, (size_t)({a[0]}).len) != NULL)')
+
         return None
 
     def gen_program(self, program: ast.Program) -> str:
@@ -1521,6 +1705,28 @@ class Codegen:
                     self.method_registry[tname] = {}
                 for m in decl.methods:
                     self.method_registry[tname][m.name] = m
+            elif isinstance(decl, ast.TraitDecl):
+                self.trait_decls[decl.name] = decl
+            elif isinstance(decl, ast.ImplTraitBlock):
+                tname = decl.type_name
+                if tname not in self.method_registry:
+                    self.method_registry[tname] = {}
+                for m in decl.methods:
+                    self.method_registry[tname][m.name] = m
+            elif isinstance(decl, ast.CfgBlock):
+                # Collect info from the wrapped declaration too
+                inner = decl.decl
+                if isinstance(inner, ast.StructDecl):
+                    self.struct_fields[inner.name] = {f.name: f.type for f in inner.fields}
+                elif isinstance(inner, ast.EnumDecl):
+                    for v in inner.variants:
+                        self.enum_variants[v.name] = inner.name
+                elif isinstance(inner, ast.VariantDecl):
+                    self.variant_types.add(inner.name)
+                    for c in inner.cases:
+                        self.enum_variants[c.name] = inner.name
+                elif isinstance(inner, ast.FnDecl):
+                    self.fn_names.append(inner.name)
             elif isinstance(decl, ast.ConstDecl):
                 # Pre-evaluate constant value string for use in type expressions
                 self.const_values[decl.name] = self.gen_expr(decl.value)
@@ -1612,6 +1818,26 @@ class Codegen:
             for typedef_name, c_inner in self._slice_typedefs:
                 out_lines.append(f'typedef struct {{ {c_inner} *data; int32_t len; }} {typedef_name};')
 
+        # Tuple typedefs
+        if self._tuple_typedefs:
+            out_lines.append('')
+            out_lines.append('/* -- Tuple types -- */')
+            out_lines.extend(self._emit_tuple_typedefs())
+
+        # Vec(T) dynamic vector typedefs + PAK_VEC_PUSH macro
+        if self._vec_used:
+            out_lines.append('')
+            out_lines.append('/* -- Vec(T) dynamic vector -- */')
+            out_lines.append('#include <stdlib.h>')
+            out_lines.append('#define _PAK_VEC_PUSH(v, item) do { \\')
+            out_lines.append('    if ((v)->len >= (v)->cap) { \\')
+            out_lines.append('        (v)->cap = (v)->cap ? (v)->cap * 2 : 8; \\')
+            out_lines.append('        (v)->data = realloc((v)->data, (size_t)(v)->cap * sizeof(*(v)->data)); \\')
+            out_lines.append('    } \\')
+            out_lines.append('    (v)->data[(v)->len++] = (item); \\')
+            out_lines.append('} while(0)')
+            out_lines.extend(self._emit_vec_typedefs())
+
         # Result typedefs
         if self._result_typedefs:
             out_lines.append('')
@@ -1675,6 +1901,12 @@ class Codegen:
             return self.gen_const(decl)
         if isinstance(decl, ast.ExternConst):
             return self.gen_extern_const(decl)
+        if isinstance(decl, ast.TraitDecl):
+            return self.gen_trait(decl)
+        if isinstance(decl, ast.ImplTraitBlock):
+            return self.gen_impl_trait(decl)
+        if isinstance(decl, ast.CfgBlock):
+            return self.gen_cfg_block(decl)
         return f'/* unhandled decl: {type(decl).__name__} */'
 
     def gen_impl(self, impl: ast.ImplBlock) -> str:
@@ -1682,6 +1914,92 @@ class Codegen:
         for method in impl.methods:
             parts.append(self.gen_fn(method, prefix=impl.type_name))
         return '\n\n'.join(parts)
+
+    def gen_trait(self, t: ast.TraitDecl) -> str:
+        """Emit vtable struct + trait-object struct for a trait declaration."""
+        self.trait_decls[t.name] = t
+        lines = [f'/* trait {t.name} */']
+
+        # Vtable: one function-pointer slot per method
+        lines.append(f'typedef struct {{')
+        for m in t.methods:
+            ret = self.gen_type(m.ret_type)
+            # All vtable slots take 'void *self' as the first arg
+            param_types = ['void *']
+            for p in m.params:
+                if p.name == 'self':
+                    continue
+                param_types.append(self.gen_type(p.type))
+            params_str = ', '.join(param_types)
+            lines.append(f'    {ret} (*{m.name})({params_str});')
+        lines.append(f'}} {t.name}_vtable;')
+        lines.append('')
+
+        # Trait-object struct (fat pointer: self + vtable)
+        lines.append(f'typedef struct {{')
+        lines.append(f'    void *self;')
+        lines.append(f'    const {t.name}_vtable *vtable;')
+        lines.append(f'}} {t.name};')
+
+        return '\n'.join(lines)
+
+    def gen_impl_trait(self, impl: ast.ImplTraitBlock) -> str:
+        """Emit thunk wrappers, vtable instance, and constructor for an impl."""
+        lines = [f'/* impl {impl.type_name} for {impl.trait_name} */']
+        trait = self.trait_decls.get(impl.trait_name)
+
+        # Register impl methods so obj.method() dispatch works
+        if impl.type_name not in self.method_registry:
+            self.method_registry[impl.type_name] = {}
+        for m in impl.methods:
+            self.method_registry[impl.type_name][m.name] = m
+
+        for m in impl.methods:
+            ret = self.gen_type(m.ret_type)
+            thunk = f'_pak_{impl.trait_name}_{m.name}_{impl.type_name}'
+            # Thunk params: void *_self, then other params
+            thunk_params = ['void *_self']
+            call_params = [f'({impl.type_name} *)_self']
+            for p in m.params:
+                if p.name == 'self':
+                    continue
+                thunk_params.append(f'{self.gen_type(p.type)} {p.name}')
+                call_params.append(p.name)
+            params_str = ', '.join(thunk_params)
+            real_fn = f'{impl.type_name}_{m.name}'
+            lines.append(f'static {ret} {thunk}({params_str}) {{')
+            call_str = f'{real_fn}({", ".join(call_params)})'
+            if ret == 'void':
+                lines.append(f'    {call_str};')
+            else:
+                lines.append(f'    return {call_str};')
+            lines.append('}')
+            lines.append('')
+
+        # Vtable instance
+        vtable_var = f'_pak_{impl.trait_name}_vtable_{impl.type_name}'
+        lines.append(f'static const {impl.trait_name}_vtable {vtable_var} = {{')
+        for m in impl.methods:
+            thunk = f'_pak_{impl.trait_name}_{m.name}_{impl.type_name}'
+            lines.append(f'    .{m.name} = {thunk},')
+        lines.append('};')
+        lines.append('')
+
+        # Constructor helper: TraitName_from_TypeName(TypeName *p)
+        ctor = f'{impl.trait_name}_from_{impl.type_name}'
+        lines.append(f'static inline {impl.trait_name} {ctor}({impl.type_name} *p) {{')
+        lines.append(f'    return ({impl.trait_name}){{ .self = (void *)p, .vtable = &{vtable_var} }};')
+        lines.append('}')
+
+        return '\n'.join(lines)
+
+    def gen_cfg_block(self, cfg: ast.CfgBlock) -> str:
+        """Emit #ifdef/#ifndef ... #endif around a declaration."""
+        inner = self.gen_decl(cfg.decl)
+        if inner is None:
+            return None
+        directive = '#ifndef' if cfg.negated else '#ifdef'
+        return f'{directive} {cfg.feature}\n{inner}\n#endif  /* {cfg.feature} */'
 
     def gen_const(self, c: ast.ConstDecl) -> str:
         val = self.gen_expr(c.value)
@@ -2020,6 +2338,10 @@ class Codegen:
         if isinstance(stmt, ast.Continue):
             return f'{pad}continue;'
         if isinstance(stmt, ast.ExprStmt):
+            # CatchExpr as a bare statement: call the function and run the error
+            # handler if the call fails, discarding the ok value.
+            if isinstance(stmt.expr, ast.CatchExpr):
+                return self._gen_catch_stmt(stmt.expr, pad, indent)
             return f'{pad}{self.gen_expr(stmt.expr)};'
         if isinstance(stmt, ast.IfStmt):
             return self.gen_if(stmt, pad, indent)
@@ -2174,6 +2496,35 @@ class Codegen:
         lines.append(f'{pad}}}')
         # success: extract value
         lines.append(f'{pad}{prefix}{decl} = {tmp}.data.value;')
+        return '\n'.join(lines)
+
+    def _gen_catch_stmt(self, catch: ast.CatchExpr, pad: str, indent: int) -> str:
+        """Emit a CatchExpr used as a bare statement (not a let binding).
+        The ok value is discarded; the error handler runs only on failure.
+
+            some_fn() catch |e| { handle(e); }
+
+        expands to:
+            { PakResult _tmp = some_fn(); if (!_tmp.is_ok) { int e = _tmp.data.error; handle(e); } }
+        """
+        self._tmp_counter = getattr(self, '_tmp_counter', 0) + 1
+        tmp = f'_catch_tmp_{self._tmp_counter}'
+        inner_pad = pad + '    '
+        lines = [f'{pad}{{']
+        lines.append(f'{inner_pad}__auto_type {tmp} = {self.gen_expr(catch.expr)};')
+        lines.append(f'{inner_pad}if (!{tmp}.is_ok) {{')
+        handler_pad = inner_pad + '    '
+        if catch.binding:
+            lines.append(f'{handler_pad}__auto_type {catch.binding} = {tmp}.data.error;')
+        if isinstance(catch.handler, ast.Block):
+            for s in catch.handler.stmts:
+                r = self.gen_stmt(s, indent + 2)
+                if r:
+                    lines.append(r)
+        else:
+            lines.append(f'{handler_pad}{self.gen_expr(catch.handler)};')
+        lines.append(f'{inner_pad}}}')
+        lines.append(f'{pad}}}')
         return '\n'.join(lines)
 
     def gen_static_stmt(self, s: ast.StaticDecl, pad: str) -> str:
