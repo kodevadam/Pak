@@ -599,7 +599,8 @@ class Parser:
         """asm { "instruction" ... } or asm volatile { ... }"""
         line, col = self.loc()
         self.expect(TT.ASM)
-        vol = True
+        # Optional `volatile` qualifier
+        vol = bool(self.match(TT.VOLATILE))
         self.expect(TT.LBRACE)
         lines_list = []
         while not self.check(TT.RBRACE) and not self.check(TT.EOF):
@@ -714,7 +715,12 @@ class Parser:
         line, col = self.loc()
         pattern = self.parse_pattern()
         self.expect(TT.FAT_ARROW)
-        body = self.parse_block()
+        if self.check(TT.LBRACE):
+            body = self.parse_block()
+        else:
+            # Single-statement arm: => stmt (no braces)
+            stmt = self.parse_stmt()
+            body = ast.Block(stmts=[stmt], line=line, col=col)
         return ast.MatchArm(pattern=pattern, guard=None, body=body, line=line, col=col)
 
     def parse_pattern(self) -> Any:

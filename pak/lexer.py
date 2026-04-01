@@ -150,12 +150,14 @@ KEYWORDS = {
     'self': TT.SELF,
     'ok': TT.OK,
     'err': TT.ERR,
-    'sizeof': TT.SIZEOF,
+    'sizeof':  TT.SIZEOF,
+    'size_of': TT.SIZEOF,    # spec alias
     'elif': TT.ELIF,
     'volatile': TT.VOLATILE,
     'const': TT.CONST,
     'asm': TT.ASM,
     'offsetof': TT.OFFSETOF,
+    'align_of': TT.ALIGNOF,  # spec alias
     'alignof': TT.ALIGNOF,
     '_': TT.UNDERSCORE,
 }

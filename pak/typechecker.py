@@ -441,6 +441,13 @@ class TypeChecker:
         anns = s.annotations or []
         if any(a in DMA_SAFE_ANNS or a.startswith('@aligned') for a in anns):
             self._aligned_vars.add(s.name)
+        # Move tracking: pointer-typed variables are moved when assigned to a new binding.
+        # This implements Pak's simplified ownership rule: resource handles (pointer types)
+        # are not copyable — assigning `let b = a` where a is *T moves ownership to b.
+        if isinstance(s.value, ast.Ident):
+            src_type = self.scope.lookup(s.value.name)
+            if isinstance(src_type, ast.TypePointer):
+                self.scope.mark_moved(s.value.name)
 
     def _check_static(self, s: ast.StaticDecl):
         if s.value:

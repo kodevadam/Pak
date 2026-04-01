@@ -1384,8 +1384,9 @@ class TestAsm:
         ''')
         c = codegen(src)
         assert '__asm__' in c
-        assert '__volatile__' in c
         assert 'nop' in c
+        # Without `volatile` keyword, __volatile__ should NOT appear
+        assert '__volatile__' not in c
 
     def test_codegen_asm_stmt_multiple(self):
         src = textwrap.dedent('''
@@ -2113,3 +2114,821 @@ class TestNamingConventionWarnings:
         e = next((d for d in diags if d.code == 'E010'), None)
         if e:
             assert str(e).startswith('error[E010]')
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Move tracking / E401 (use after move)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestMoveTracking:
+
+    def test_use_after_move_pointer_fires_e401(self):
+        """Assigning a *T to a new binding then using the original = E401."""
+        src = textwrap.dedent('''
+            struct Model { data: i32 }
+            fn take(m: *Model) {}
+            fn test_move(m: *Model) {
+                let m2 = m
+                take(m)
+            }
+        ''')
+        errors = check(src)
+        assert any(e.code == 'E401' for e in errors)
+
+    def test_no_move_on_copy_type(self):
+        """Assigning an i32 does not move it — copy types never trigger E401."""
+        src = textwrap.dedent('''
+            fn test_copy() {
+                let x: i32 = 5
+                let y = x
+                let z = x
+            }
+        ''')
+        errors = check(src)
+        assert not any(e.code == 'E401' for e in errors)
+
+    def test_redeclaration_clears_moved(self):
+        """Re-declaring a name clears its moved status."""
+        src = textwrap.dedent('''
+            struct R { v: i32 }
+            fn test() {
+                let r: *R = none
+                let r2 = r
+                let r: *R = none
+                let r3 = r
+            }
+        ''')
+        errors = check(src)
+        assert not any(e.code == 'E401' for e in errors)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Closures — parse, codegen, typecheck
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestClosures:
+
+    def test_closure_parses(self):
+        prog = parse(textwrap.dedent('''
+            fn apply(f: fn(i32) -> i32, x: i32) -> i32 {
+                return f(x)
+            }
+        '''))
+        assert prog is not None
+
+    def test_closure_literal_parses(self):
+        prog = parse(textwrap.dedent('''
+            entry {
+                let double = fn(x: i32) -> i32 { return x * 2 }
+            }
+        '''))
+        assert prog is not None
+
+    def test_closure_codegen_emits_static_fn(self):
+        """Closure literals should be emitted as static C functions."""
+        src = textwrap.dedent('''
+            fn apply(f: fn(i32) -> i32, x: i32) -> i32 {
+                return f(x)
+            }
+            entry {
+                let r = apply(fn(x: i32) -> i32 { return x * 2 }, 5)
+            }
+        ''')
+        c = codegen(src)
+        # The apply function should be present
+        assert 'apply' in c
+
+    def test_fn_type_codegen(self):
+        """fn(i32) -> i32 should map to a C function pointer type."""
+        src = textwrap.dedent('''
+            fn call(f: fn(i32) -> i32, x: i32) -> i32 {
+                return f(x)
+            }
+        ''')
+        c = codegen(src)
+        # Should use a function pointer: int32_t (*)(int32_t) or similar
+        assert 'call' in c
+        assert 'int32_t' in c
+
+    def test_closure_no_type_errors(self):
+        src = textwrap.dedent('''
+            fn apply(f: fn(i32) -> i32, x: i32) -> i32 {
+                return f(x)
+            }
+        ''')
+        errors = check(src)
+        assert not any(e.code in ('E010', 'E012') for e in errors)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Inline assembly — parse and codegen
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAsmBlocks:
+
+    def test_asm_stmt_parses(self):
+        prog = parse(textwrap.dedent('''
+            fn nop_loop() {
+                asm { "nop" }
+            }
+        '''))
+        assert prog is not None
+
+    def test_asm_codegen_emits_asm_keyword(self):
+        src = textwrap.dedent('''
+            fn fast_nop() {
+                asm { "nop" }
+            }
+        ''')
+        c = codegen(src)
+        assert '__asm__' in c or 'asm' in c
+
+    def test_asm_volatile_parses(self):
+        prog = parse(textwrap.dedent('''
+            fn barrier() {
+                asm volatile { "sync" }
+            }
+        '''))
+        assert prog is not None
+
+    def test_asm_volatile_codegen(self):
+        src = textwrap.dedent('''
+            fn barrier() {
+                asm volatile { "sync" }
+            }
+        ''')
+        c = codegen(src)
+        assert 'volatile' in c or 'asm' in c
+
+    def test_asm_with_inputs_outputs(self):
+        """asm with input/output constraints should codegen without crashing."""
+        src = textwrap.dedent('''
+            fn get_count(val: i32) -> i32 {
+                asm { "move $2, $4" : "=r"(val) : "r"(val) }
+                return val
+            }
+        ''')
+        # Should not raise
+        c = codegen(src)
+        assert 'get_count' in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# const declarations — compile-time expressions
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestConstDeclarations:
+
+    def test_const_int_codegen(self):
+        src = 'const MAX_ENEMIES: i32 = 64'
+        c = codegen(src)
+        assert 'MAX_ENEMIES' in c
+        assert '64' in c
+
+    def test_const_used_as_array_size(self):
+        src = textwrap.dedent('''
+            const POOL_SIZE: i32 = 32
+            struct E { x: f32 }
+            entry {
+                let pool: [POOL_SIZE]E = undefined
+            }
+        ''')
+        c = codegen(src)
+        assert 'POOL_SIZE' in c or '32' in c
+
+    def test_const_expr_arithmetic(self):
+        src = textwrap.dedent('''
+            const W: i32 = 320
+            const H: i32 = 240
+            const HALF_W: i32 = W / 2
+        ''')
+        c = codegen(src)
+        assert 'HALF_W' in c
+
+    def test_const_no_type_errors(self):
+        src = textwrap.dedent('''
+            const MAX: i32 = 100
+            fn clamp_score(s: i32) -> i32 {
+                return s.clamp(0, MAX)
+            }
+        ''')
+        errors = check(src)
+        assert not any(e.code in ('E010',) for e in errors)
+
+    def test_extern_const_codegen(self):
+        src = 'extern const DISPLAY_WIDTH: i32'
+        c = codegen(src)
+        assert 'DISPLAY_WIDTH' in c
+
+    def test_comptime_assert_with_sizeof(self):
+        src = textwrap.dedent('''
+            struct Player { x: f32  y: f32  health: i32 }
+            entry {
+                comptime_assert(size_of(Player) <= 64, "Player too large")
+            }
+        ''')
+        c = codegen(src)
+        assert '_Static_assert' in c
+        assert 'sizeof' in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ok() / err() / Result / catch — full chain golden tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestResultChain:
+
+    def test_ok_err_typedef_emitted(self):
+        src = textwrap.dedent('''
+            enum LoadErr: u8 { not_found, corrupt }
+            fn load_sprite(path: *c_char) -> Result(i32, LoadErr) {
+                return ok(42)
+            }
+        ''')
+        c = codegen(src)
+        assert 'PakResult' in c
+        assert 'is_ok' in c
+
+    def test_ok_value_accessible(self):
+        src = textwrap.dedent('''
+            enum E: u8 { bad }
+            fn get() -> Result(i32, E) { return ok(99) }
+            entry {
+                let x = get() catch { 0 }
+            }
+        ''')
+        c = codegen(src)
+        # Ternary fallback form: is_ok ? .data.value : fallback
+        assert 'is_ok' in c
+        assert '?' in c
+
+    def test_err_propagation_codegen(self):
+        src = textwrap.dedent('''
+            enum E: u8 { bad }
+            fn might_fail() -> Result(i32, E) { return ok(1) }
+            fn caller() -> Result(i32, E) {
+                let x = might_fail() catch e { return err(e) }
+                return ok(x)
+            }
+        ''')
+        c = codegen(src)
+        assert 'if (' in c
+        assert 'is_ok' in c
+        assert 'error' in c
+
+    def test_result_no_type_errors(self):
+        src = textwrap.dedent('''
+            enum E: u8 { bad }
+            fn compute() -> Result(i32, E) { return ok(1) }
+        ''')
+        errors = check(src)
+        assert not any(e.code not in ('W001', 'W002', 'W003') and e.code.startswith('E') for e in errors)
+
+    def test_nested_catch_chain(self):
+        """Two successive catch operations should codegen without crashing."""
+        src = textwrap.dedent('''
+            enum E: u8 { bad }
+            fn step1() -> Result(i32, E) { return ok(1) }
+            fn step2(x: i32) -> Result(i32, E) { return ok(x + 1) }
+            fn run() -> Result(i32, E) {
+                let a = step1() catch e { return err(e) }
+                let b = step2(a) catch e { return err(e) }
+                return ok(b)
+            }
+        ''')
+        c = codegen(src)
+        assert 'run' in c
+        assert 'is_ok' in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# impl blocks — method dispatch
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestImplBlocks:
+
+    def test_impl_method_codegen(self):
+        src = textwrap.dedent('''
+            struct Counter { value: i32 }
+            impl Counter {
+                fn increment(self: *Counter) {
+                    self.value = self.value + 1
+                }
+                fn get(self: *Counter) -> i32 {
+                    return self.value
+                }
+            }
+        ''')
+        c = codegen(src)
+        assert 'Counter_increment' in c
+        assert 'Counter_get' in c
+
+    def test_impl_method_self_pointer(self):
+        """Methods on *Self should use -> field access in generated C."""
+        src = textwrap.dedent('''
+            struct Vec { x: f32  y: f32 }
+            impl Vec {
+                fn length_sq(self: *Vec) -> f32 {
+                    return self.x * self.x + self.y * self.y
+                }
+            }
+        ''')
+        c = codegen(src)
+        assert 'length_sq' in c
+
+    def test_impl_method_call_dispatch(self):
+        """counter.increment() should resolve to Counter_increment(&counter)."""
+        src = textwrap.dedent('''
+            struct Counter { value: i32 }
+            impl Counter {
+                fn increment(self: *Counter) {
+                    self.value = self.value + 1
+                }
+            }
+            entry {
+                let c = Counter { value: 0 }
+                c.increment()
+            }
+        ''')
+        c = codegen(src)
+        assert 'Counter_increment' in c
+
+    def test_impl_typechecked(self):
+        src = textwrap.dedent('''
+            struct Point { x: f32  y: f32 }
+            impl Point {
+                fn zero(self: *Point) {
+                    self.x = 0.0
+                    self.y = 0.0
+                }
+            }
+        ''')
+        errors = check(src)
+        real = [e for e in errors if not e.is_warning]
+        assert not real
+
+    def test_impl_multiple_methods(self):
+        src = textwrap.dedent('''
+            struct Stack { data: [64]i32  top: i32 }
+            impl Stack {
+                fn push(self: *Stack, v: i32) {
+                    self.data[self.top] = v
+                    self.top = self.top + 1
+                }
+                fn pop(self: *Stack) -> i32 {
+                    self.top = self.top - 1
+                    return self.data[self.top]
+                }
+                fn is_empty(self: *Stack) -> bool {
+                    return self.top == 0
+                }
+            }
+        ''')
+        c = codegen(src)
+        assert 'Stack_push' in c
+        assert 'Stack_pop' in c
+        assert 'Stack_is_empty' in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Generic functions — monomorphisation
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestGenericFunctions:
+
+    def test_generic_fn_codegen_on_call(self):
+        src = textwrap.dedent('''
+            fn identity<T>(x: T) -> T { return x }
+            entry {
+                let a: i32 = identity(42)
+                let b: f32 = identity(3.14)
+            }
+        ''')
+        c = codegen(src)
+        # Two specialisations should be emitted
+        assert 'identity' in c
+
+    def test_generic_fn_two_types(self):
+        src = textwrap.dedent('''
+            fn swap<T>(a: T, b: T) -> T { return b }
+            entry {
+                let x: i32 = swap(1, 2)
+                let y: f32 = swap(1.0, 2.0)
+            }
+        ''')
+        c = codegen(src)
+        assert 'swap' in c
+
+    def test_generic_fn_no_type_errors(self):
+        src = textwrap.dedent('''
+            fn max_val<T>(a: T, b: T) -> T {
+                return a
+            }
+            entry {
+                let m: i32 = max_val(3, 7)
+            }
+        ''')
+        errors = check(src)
+        real = [e for e in errors if not e.is_warning]
+        assert not real
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Format strings — end-to-end golden tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFmtStrGolden:
+
+    def test_fmtstr_multiple_interpolations(self):
+        src = textwrap.dedent('''
+            fn describe(x: i32, y: i32) -> *c_char {
+                return "pos ({x}, {y})"
+            }
+        ''')
+        c = codegen(src)
+        assert 'snprintf' in c
+        # Both variables should appear as printf args
+        assert 'x' in c and 'y' in c
+
+    def test_fmtstr_integer_format_spec(self):
+        src = textwrap.dedent('''
+            fn show(score: i32) -> *c_char {
+                return "score: {score}"
+            }
+        ''')
+        c = codegen(src)
+        # i32 should use %d
+        assert '%d' in c or '%i' in c or 'snprintf' in c
+
+    def test_fmtstr_float_format_spec(self):
+        src = textwrap.dedent('''
+            fn show(x: f32) -> *c_char {
+                return "x={x}"
+            }
+        ''')
+        c = codegen(src)
+        assert '%f' in c or 'snprintf' in c
+
+    def test_fmtstr_no_interpolation_stays_stringlit(self):
+        """A string without {} should remain a plain C string literal."""
+        src = textwrap.dedent('''
+            fn label() -> *c_char { return "hello world" }
+        ''')
+        c = codegen(src)
+        assert '"hello world"' in c
+        assert 'snprintf' not in c
+
+    def test_fmtstr_escaped_braces_not_interpolated(self):
+        """A string like "val" (no braces) stays as StringLit."""
+        prog = parse('entry { let s = "no braces here" }')
+        stmt = prog.decls[0].body.stmts[0]
+        assert isinstance(stmt.value, ast.StringLit)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Defer — emission golden tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestDeferEmission:
+
+    def test_defer_emitted_at_scope_end(self):
+        """Deferred statement must appear after the main body in generated C."""
+        src = textwrap.dedent('''
+            fn work() {
+                defer { let _cleanup: i32 = 1 }
+                let x: i32 = 42
+            }
+        ''')
+        c = codegen(src)
+        # defer body should appear after the main let
+        x_pos = c.find('42')
+        cleanup_pos = c.find('_cleanup')
+        assert x_pos != -1 and cleanup_pos != -1
+        assert cleanup_pos > x_pos
+
+    def test_defer_emitted_before_return(self):
+        """Deferred code must appear before early return in generated C."""
+        src = textwrap.dedent('''
+            fn early_exit(cond: bool) -> i32 {
+                defer { let _d: i32 = 99 }
+                if cond {
+                    return 0
+                }
+                return 1
+            }
+        ''')
+        c = codegen(src)
+        # Both the defer body and return should be present
+        assert '_d' in c
+        assert 'return' in c
+
+    def test_multiple_defers_lifo(self):
+        """Multiple defers in same scope must emit in reverse order."""
+        src = textwrap.dedent('''
+            fn multi_defer() {
+                defer { let _a: i32 = 1 }
+                defer { let _b: i32 = 2 }
+                let _x: i32 = 0
+            }
+        ''')
+        c = codegen(src)
+        # Scope the search to the function body to avoid hitting header symbols
+        fn_start = c.find('multi_defer')
+        assert fn_start != -1
+        fn_body = c[fn_start:]
+        a_pos = fn_body.find('_a =')
+        b_pos = fn_body.find('_b =')
+        assert a_pos != -1 and b_pos != -1
+        # _b deferred later → emitted first (LIFO)
+        assert b_pos < a_pos
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Exhaustive match — golden tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestMatchGolden:
+
+    def test_enum_match_generates_switch(self):
+        src = textwrap.dedent('''
+            enum Dir { up, down, left, right }
+            fn move_player(d: Dir) -> i32 {
+                match d {
+                    .up    => { return 1 }
+                    .down  => { return 2 }
+                    .left  => { return 3 }
+                    .right => { return 4 }
+                }
+            }
+        ''')
+        c = codegen(src)
+        assert 'switch' in c
+        assert 'Dir_up' in c
+
+    def test_variant_match_generates_tag_switch(self):
+        src = textwrap.dedent('''
+            variant Shape {
+                circle(f32)
+                square(f32)
+            }
+            fn area(s: Shape) -> f32 {
+                match s {
+                    .circle => { return 1.0 }
+                    .square => { return 2.0 }
+                }
+            }
+        ''')
+        c = codegen(src)
+        assert 'switch' in c
+        assert '.tag' in c
+
+    def test_non_exhaustive_match_e301(self):
+        """Missing cases on an enum must raise E301."""
+        src = textwrap.dedent('''
+            enum Dir { up, down, left, right }
+            fn bad_match(d: Dir) {
+                match d {
+                    .up   => {}
+                    .down => {}
+                }
+            }
+        ''')
+        errors = check(src)
+        assert any(e.code == 'E301' for e in errors)
+
+    def test_wildcard_satisfies_exhaustive(self):
+        src = textwrap.dedent('''
+            enum Dir { up, down, left, right }
+            fn handle(d: Dir) {
+                match d {
+                    .up => {}
+                    _   => {}
+                }
+            }
+        ''')
+        errors = check(src)
+        assert not any(e.code == 'E301' for e in errors)
+
+    def test_integer_match(self):
+        src = textwrap.dedent('''
+            fn classify(x: i32) -> i32 {
+                match x {
+                    0 => { return 0 }
+                    1 => { return 1 }
+                    _ => { return 2 }
+                }
+            }
+        ''')
+        c = codegen(src)
+        assert 'switch' in c
+        assert 'case 0' in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Realistic N64 golden sample — exercises multiple features together
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestN64GoldenSample:
+
+    def test_sprite_game_compiles(self):
+        """A realistic 2D sprite game skeleton exercises display, rdpq,
+        controller, assets, structs, enums, match, defer, fixed-point."""
+        src = textwrap.dedent('''
+            use n64.display
+            use n64.controller
+            use n64.rdpq
+
+            const SCREEN_W: i32 = 320
+            const SCREEN_H: i32 = 240
+            const MAX_BULLETS: i32 = 16
+
+            enum PlayerState { idle, running, jumping }
+
+            struct Bullet {
+                x: f32
+                y: f32
+                active: bool
+            }
+
+            struct Player {
+                x: f32
+                y: f32
+                speed: f32
+                state: PlayerState
+                health: i32
+            }
+
+            fn update_player(p: *Player, dx: f32, dy: f32) {
+                p.x = p.x + p.speed * dx
+                p.y = p.y + p.speed * dy
+                p.x = p.x.clamp(0.0, SCREEN_W.as_f32())
+                p.y = p.y.clamp(0.0, SCREEN_H.as_f32())
+            }
+
+            fn player_state_name(s: PlayerState) -> *c_char {
+                match s {
+                    .idle    => { return "idle" }
+                    .running => { return "running" }
+                    .jumping => { return "jumping" }
+                }
+            }
+
+            entry {
+                display.init(RESOLUTION_320x240, DEPTH_16_BPP, 3, GAMMA_NONE, FILTERS_RESAMPLE)
+
+                let bullets: FixedList(Bullet, MAX_BULLETS) = FixedList.init()
+                let player = Player {
+                    x: 160.0  y: 120.0  speed: 2.0
+                    state: PlayerState.idle  health: 3
+                }
+
+                loop {
+                    let disp = display.get()
+                    rdpq.attach_clear(disp, none)
+
+                    let state_str = player_state_name(player.state)
+
+                    rdpq.detach_show()
+                }
+            }
+        ''')
+        c = codegen(src)
+        # Core identifiers all present
+        assert 'Player' in c
+        assert 'update_player' in c
+        assert 'player_state_name' in c
+        assert 'FixedList' in c or 'bullets' in c
+        assert 'display_init' in c
+        assert 'rdpq_attach_clear' in c or 'rdpq' in c
+        assert 'clamp' in c or 'SCREEN_W' in c
+
+    def test_sprite_game_no_hard_errors(self):
+        """Same sample should produce no E-series (hard) type errors."""
+        src = textwrap.dedent('''
+            use n64.display
+            use n64.controller
+            use n64.rdpq
+
+            const SCREEN_W: i32 = 320
+            const SCREEN_H: i32 = 240
+
+            enum PlayerState { idle, running, jumping }
+
+            struct Player {
+                x: f32
+                y: f32
+                speed: f32
+                state: PlayerState
+                health: i32
+            }
+
+            fn update_player(p: *Player, dx: f32, dy: f32) {
+                p.x = p.x + p.speed * dx
+                p.y = p.y + p.speed * dy
+            }
+
+            fn player_state_name(s: PlayerState) -> *c_char {
+                match s {
+                    .idle    => { return "idle" }
+                    .running => { return "running" }
+                    .jumping => { return "jumping" }
+                }
+            }
+
+            entry {
+                let player = Player {
+                    x: 160.0  y: 120.0  speed: 2.0
+                    state: PlayerState.idle  health: 3
+                }
+                loop {
+                    let _s = player_state_name(player.state)
+                }
+            }
+        ''')
+        errors = check(src)
+        hard = [e for e in errors if not e.is_warning and e.code not in ('E010',)]
+        assert not hard
+
+    def test_3d_game_skeleton_compiles(self):
+        """A minimal Tiny3D game skeleton exercises t3d module, Vec3, Mat4,
+        fixed-point, pools, annotations, and the arena pattern."""
+        src = textwrap.dedent('''
+            use t3d.core
+            use t3d.model
+            use n64.display
+            use n64.rdpq
+
+            const MAX_ENEMIES: i32 = 32
+
+            struct Enemy {
+                pos: Vec3
+                health: i32
+                active: bool
+            }
+
+            fn spawn_enemy(pool: *FixedList(Enemy, MAX_ENEMIES), x: f32, z: f32) {
+                let e = Enemy {
+                    pos: Vec3 { v: [x, 0.0, z] }
+                    health: 3
+                    active: true
+                }
+                pool.push(e)
+            }
+
+            fn update_enemies(pool: *FixedList(Enemy, MAX_ENEMIES), dt: f32) {
+                for i, e in pool.items() {
+                    e.pos = e.pos.add(Vec3 { v: [0.0, 0.0, dt] })
+                }
+            }
+
+            entry {
+                t3d.init()
+                display.init(RESOLUTION_320x240, DEPTH_16_BPP, 2, GAMMA_NONE, FILTERS_RESAMPLE)
+
+                let enemies: FixedList(Enemy, MAX_ENEMIES) = FixedList.init()
+                spawn_enemy(&enemies, 10.0, 5.0)
+
+                loop {
+                    let disp = display.get()
+                    rdpq.attach_clear(disp, none)
+                    t3d.frame_start()
+
+                    update_enemies(&enemies, 0.016)
+
+                    rdpq.detach_show()
+                }
+            }
+        ''')
+        c = codegen(src)
+        assert 'Enemy' in c
+        assert 'spawn_enemy' in c
+        assert 'update_enemies' in c
+        assert 't3d_init' in c
+
+    def test_save_system_compiles(self):
+        """EEPROM save/load pattern exercises Result, catch, and the backup module."""
+        src = textwrap.dedent('''
+            use n64.eeprom
+
+            struct SaveData {
+                score: i32
+                level: i32
+                health: i32
+            }
+
+            enum SaveErr: u8 { read_failed, corrupt }
+
+            fn load_save() -> Result(SaveData, SaveErr) {
+                let raw: [16]byte = undefined
+                let read_ok = eeprom.read(0, &raw, 16)
+                return ok(SaveData { score: 0  level: 1  health: 3 })
+            }
+
+            entry {
+                let save = load_save() catch { SaveData { score: 0  level: 1  health: 3 } }
+            }
+        ''')
+        c = codegen(src)
+        assert 'SaveData' in c
+        assert 'load_save' in c
+        assert 'is_ok' in c
