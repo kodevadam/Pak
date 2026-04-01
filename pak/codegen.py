@@ -562,6 +562,7 @@ PRIMITIVE_TYPES = {
     'CStr': 'const char *',
     'c_char': 'char',
     'Arena': 'PakArena',
+    'Allocator': 'Allocator',  # built-in allocator trait object
     'void': 'void',
 }
 
@@ -700,6 +701,7 @@ class Codegen:
         self._vec_typedefs: List[tuple] = []
         self._vec_typedef_names: set = set()
         self._vec_used: bool = False
+        self._allocator_used: bool = False
 
     # ── Scope helpers ─────────────────────────────────────────────────────────
 
@@ -1070,6 +1072,15 @@ class Codegen:
                 cond = args_strs[0] if args_strs else 'true'
                 msg = args_strs[1] if len(args_strs) > 1 else '"assertion"'
                 return f'_Static_assert({cond}, {msg})'
+            # heap_allocator() → pak_heap_allocator()
+            if isinstance(e.func, ast.Ident) and e.func.name == 'heap_allocator':
+                self._allocator_used = True
+                return 'pak_heap_allocator()'
+            # arena_allocator(arena_ptr) → Allocator_from_Arena(arena_ptr)
+            if isinstance(e.func, ast.Ident) and e.func.name == 'arena_allocator':
+                self._allocator_used = True
+                arg = args_strs[0] if args_strs else '0'
+                return f'Allocator_from_Arena({arg})'
             # Static type-method calls: Vec3.zero(), Mat4.identity(), Vec3.from(...) etc.
             if isinstance(e.func, ast.DotAccess) and isinstance(e.func.obj, ast.Ident):
                 type_name = e.func.obj.name
@@ -1250,12 +1261,25 @@ class Codegen:
             return f'({obj}).f{e.index}'
         if isinstance(e, ast.AllocExpr):
             c_type = self.gen_type(e.type_node)
+            if e.allocator is not None:
+                self._allocator_used = True
+                alloc_c = self.gen_expr(e.allocator)
+                if e.count is not None:
+                    count = self.gen_expr(e.count)
+                    return (f'({c_type} *)({alloc_c}).vtable->alloc_bytes('
+                            f'({alloc_c}).self, sizeof({c_type}) * (size_t)({count}))')
+                return (f'({c_type} *)({alloc_c}).vtable->alloc_bytes('
+                        f'({alloc_c}).self, sizeof({c_type}))')
             if e.count is not None:
                 count = self.gen_expr(e.count)
                 return f'({c_type} *)malloc(sizeof({c_type}) * (size_t)({count}))'
             return f'({c_type} *)malloc(sizeof({c_type}))'
         if isinstance(e, ast.FreeExpr):
             ptr = self.gen_expr(e.ptr)
+            if e.allocator is not None:
+                self._allocator_used = True
+                alloc_c = self.gen_expr(e.allocator)
+                return f'({alloc_c}).vtable->dealloc_bytes(({alloc_c}).self, {ptr})'
             return f'free({ptr})'
         return '/* unknown expr */'
 
@@ -1810,6 +1834,21 @@ class Codegen:
         out_lines.append('    if (a->ptr + sz > a->base + a->capacity) return NULL;')
         out_lines.append('    void *p = a->ptr; a->ptr += sz; return p; }')
         out_lines.append('static inline void pak_arena_reset(PakArena *a) { a->ptr = a->base; }')
+        if self._allocator_used:
+            out_lines.append('')
+            out_lines.append('/* -- Allocator trait (vtable-based custom allocator interface) -- */')
+            out_lines.append('typedef struct { void *(*alloc_bytes)(void *, size_t); void (*dealloc_bytes)(void *, void *); } Allocator_vtable;')
+            out_lines.append('typedef struct { void *self; const Allocator_vtable *vtable; } Allocator;')
+            out_lines.append('/* PakArena as Allocator */')
+            out_lines.append('static void *_pak_alloc_bytes_Arena(void *_s, size_t sz) { return pak_arena_alloc((PakArena *)_s, sz); }')
+            out_lines.append('static void _pak_dealloc_bytes_Arena(void *_s, void *p) { (void)_s; (void)p; }')
+            out_lines.append('static const Allocator_vtable _pak_vtable_Arena = { _pak_alloc_bytes_Arena, _pak_dealloc_bytes_Arena };')
+            out_lines.append('static inline Allocator Allocator_from_Arena(PakArena *p) { return (Allocator){ .self=(void *)p, .vtable=&_pak_vtable_Arena }; }')
+            out_lines.append('/* Heap (malloc/free) as Allocator */')
+            out_lines.append('static void *_pak_alloc_bytes_Heap(void *_s, size_t sz) { (void)_s; return malloc(sz); }')
+            out_lines.append('static void _pak_dealloc_bytes_Heap(void *_s, void *p) { (void)_s; free(p); }')
+            out_lines.append('static const Allocator_vtable _pak_vtable_Heap = { _pak_alloc_bytes_Heap, _pak_dealloc_bytes_Heap };')
+            out_lines.append('static inline Allocator pak_heap_allocator(void) { return (Allocator){ .self=NULL, .vtable=&_pak_vtable_Heap }; }')
 
         # Fat-slice typedefs (emitted after includes so inner types are visible,
         # and after body generation so all slices have been encountered)

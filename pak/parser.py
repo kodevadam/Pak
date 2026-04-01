@@ -1216,24 +1216,36 @@ class Parser:
             self.expect(TT.RPAREN)
             return ast.OffsetOf(type_name=type_name, field=field_name, line=line, col=col)
 
-        # alloc(T) or alloc(T, n) — heap allocation primitive
+        # alloc(T) or alloc(T, n) or alloc(T using a) or alloc(T, n using a)
         if tok.type == TT.ALLOC:
             self.advance()
             self.expect(TT.LPAREN)
             type_node = self.parse_type()
             count = None
+            allocator = None
             if self.match(TT.COMMA):
-                count = self.parse_expr()
+                # peek: if it's "using" keyword (ident), count remains None and we read allocator
+                # otherwise parse count expression, then check for "using"
+                if not (self.check(TT.IDENT) and self.peek().value == 'using'):
+                    count = self.parse_expr()
+            # check for "using allocator_expr"
+            if self.check(TT.IDENT) and self.peek().value == 'using':
+                self.advance()  # consume 'using'
+                allocator = self.parse_expr()
             self.expect(TT.RPAREN)
-            return ast.AllocExpr(type_node=type_node, count=count, line=line, col=col)
+            return ast.AllocExpr(type_node=type_node, count=count, allocator=allocator, line=line, col=col)
 
-        # free(ptr) — heap deallocation primitive
+        # free(ptr) or free(ptr using a)
         if tok.type == TT.FREE:
             self.advance()
             self.expect(TT.LPAREN)
             ptr = self.parse_expr()
+            allocator = None
+            if self.check(TT.IDENT) and self.peek().value == 'using':
+                self.advance()  # consume 'using'
+                allocator = self.parse_expr()
             self.expect(TT.RPAREN)
-            return ast.FreeExpr(ptr=ptr, line=line, col=col)
+            return ast.FreeExpr(ptr=ptr, allocator=allocator, line=line, col=col)
 
         # fn(...) -> T { body } — fn literal / closure
         if tok.type == TT.FN:

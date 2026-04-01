@@ -319,6 +319,7 @@ class AllocExpr:
     """alloc(T) or alloc(T, n) — heap allocation primitive."""
     type_node: Any          # type to allocate
     count: Optional[Any]    # element count; None means single item
+    allocator: Optional[Any] = None   # NEW: custom allocator expression
     line: int = 0
     col: int = 0
 
@@ -326,6 +327,7 @@ class AllocExpr:
 class FreeExpr:
     """free(ptr) — heap deallocation primitive."""
     ptr: Any
+    allocator: Optional[Any] = None   # NEW: custom allocator expression
     line: int = 0
     col: int = 0
 

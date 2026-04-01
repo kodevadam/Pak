@@ -3472,3 +3472,129 @@ class TestFmtStrBraceEscape:
         let = prog.decls[0].body.stmts[0]
         assert isinstance(let.value, ast.StringLit)
         assert let.value.value == '{}'
+
+
+class TestCustomAllocators:
+    """alloc(T using a), free(ptr using a), Allocator trait, heap_allocator()."""
+
+    def test_parse_alloc_using(self):
+        src = textwrap.dedent('''
+            fn f(a: Allocator) -> void {
+                let p = alloc(i32 using a)
+            }
+        ''')
+        prog = parse(src)
+        let = prog.decls[0].body.stmts[0]
+        assert isinstance(let.value, ast.AllocExpr)
+        assert let.value.allocator is not None
+        assert let.value.count is None
+
+    def test_parse_alloc_array_using(self):
+        src = textwrap.dedent('''
+            fn f(a: Allocator) -> void {
+                let p = alloc(i32, 10 using a)
+            }
+        ''')
+        prog = parse(src)
+        let = prog.decls[0].body.stmts[0]
+        assert isinstance(let.value, ast.AllocExpr)
+        assert let.value.count is not None
+        assert let.value.allocator is not None
+
+    def test_parse_free_using(self):
+        src = textwrap.dedent('''
+            fn f(p: *i32, a: Allocator) -> void {
+                free(p using a)
+            }
+        ''')
+        prog = parse(src)
+        stmt = prog.decls[0].body.stmts[0]
+        assert isinstance(stmt.expr, ast.FreeExpr)
+        assert stmt.expr.allocator is not None
+
+    def test_codegen_alloc_using_vtable(self):
+        src = textwrap.dedent('''
+            fn f(a: Allocator) -> void {
+                let p = alloc(i32 using a)
+            }
+        ''')
+        c = codegen(src)
+        assert 'vtable->alloc_bytes' in c
+        assert 'sizeof(int32_t)' in c
+
+    def test_codegen_alloc_array_using(self):
+        src = textwrap.dedent('''
+            fn f(a: Allocator) -> void {
+                let p = alloc(i32, 16 using a)
+            }
+        ''')
+        c = codegen(src)
+        assert 'vtable->alloc_bytes' in c
+        assert '16' in c
+
+    def test_codegen_free_using(self):
+        src = textwrap.dedent('''
+            fn f(p: *i32, a: Allocator) -> void {
+                free(p using a)
+            }
+        ''')
+        c = codegen(src)
+        assert 'vtable->dealloc_bytes' in c
+
+    def test_codegen_allocator_preamble(self):
+        src = textwrap.dedent('''
+            fn f(a: Allocator) -> void {
+                let p = alloc(i32 using a)
+            }
+        ''')
+        c = codegen(src)
+        assert 'Allocator_vtable' in c
+        assert 'alloc_bytes' in c
+        assert 'dealloc_bytes' in c
+
+    def test_codegen_arena_allocator_helper(self):
+        src = textwrap.dedent('''
+            fn f(a: Allocator) -> void {
+                let p = alloc(i32 using a)
+            }
+        ''')
+        c = codegen(src)
+        assert 'Allocator_from_Arena' in c
+        assert 'PakArena' in c
+
+    def test_codegen_heap_allocator_fn(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let a = heap_allocator()
+                let p = alloc(i32 using a)
+            }
+        ''')
+        c = codegen(src)
+        assert 'pak_heap_allocator' in c
+
+    def test_codegen_allocator_type_name(self):
+        src = textwrap.dedent('''
+            fn f(a: Allocator) -> void { return }
+        ''')
+        c = codegen(src)
+        assert 'Allocator a' in c
+
+    def test_alloc_without_using_still_malloc(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let p = alloc(i32)
+            }
+        ''')
+        c = codegen(src)
+        assert 'malloc' in c
+        assert 'vtable->alloc_bytes' not in c   # no vtable dispatch for plain malloc
+
+    def test_free_without_using_still_free(self):
+        src = textwrap.dedent('''
+            fn f(p: *i32) -> void {
+                free(p)
+            }
+        ''')
+        c = codegen(src)
+        assert 'free(p)' in c
+        assert 'vtable->dealloc_bytes' not in c  # no vtable dispatch for plain free
