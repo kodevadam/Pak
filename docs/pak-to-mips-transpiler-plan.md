@@ -360,14 +360,16 @@ Phase 4  [N64 Hardware]    ██████████  ✅ DONE — N64Runti
 Phase 5  [Optimization]    ██████████  ✅ DONE — Peephole (li→move, self-move elim, store-load elim, li+addu→addiu), delay slot filling, dead label elimination
 Phase 5b [CLI Integration] ██████████  ✅ DONE — `pak build --backend mips`, `pak explain --backend mips`, Makefile .s support
 Phase 6  [Test Game]       ██████████  ✅ DONE — "Dungeon of Types" scaffold: structs, variants, methods, fixed-point, defer, Result, inline asm, nested control flow
-Phase 7  [Graduation]      ████████░░  🔶 IN PROGRESS — Differential testing (22 tests), example compilation (2/3 pass), xfail: model_viewer (needs external types)
+Phase 7  [Graduation]      ██████████  ✅ DONE — Differential testing (25 tests), all 3 examples compile, register allocator with fallback, VR4300 scheduling
 ```
 
 ### Implementation Stats
 - **pak/mips/mips_codegen.py**: ~1800 lines — full AST walker, backend validation
 - **pak/mips/optimize.py**: ~250 lines — 3-pass post-processing optimizer
-- **Test coverage**: 154 MIPS codegen tests + 11 CLI tests + 25 differential tests = 190 MIPS-specific tests
-- **Total test suite**: 231 tests (including 41 checker tests), 230 passing + 1 xfail
-- **Example programs**: features.pak ✅, sprite_game.pak ✅, model_viewer.pak ❌ (external type dependency)
+- **Test coverage**: 163 MIPS codegen tests + 11 CLI tests + 25 differential tests = 199 MIPS-specific tests
+- **Total test suite**: 240 tests (including 41 checker tests), all passing
+- **Example programs**: features.pak ✅, sprite_game.pak ✅, model_viewer.pak ✅
+- **Optimizer passes**: peephole, VR4300 scheduling (load-use, mult/div latency), delay slot filling, dead label elimination
+- **Register allocator**: caller-saved pool with callee-saved fallback, dynamic prologue/epilogue
 
 Phase 6 is not sequential — it grows alongside every other phase. Each time a new feature lands in the MIPS backend, the test game adds code that uses it, and we diff again.
