@@ -4,15 +4,26 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Any
 
 
-# Base class uses slots trick: we put line/col at the end via keyword-only
-# Simpler: just put all required fields before optional ones in each node.
-# We don't inherit from a base - nodes are standalone dataclasses.
-
 # ── Types ────────────────────────────────────────────────────────────────────
 
 @dataclass
 class TypeName:
     name: str
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class TypeParam:
+    """A generic type parameter placeholder, e.g. T in fn foo<T>(...)"""
+    name: str
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class TypeGeneric:
+    """A parameterized type, e.g. List<i32> or Map<Str, i32>"""
+    name: str
+    args: List[Any]
     line: int = 0
     col: int = 0
 
@@ -70,6 +81,7 @@ class IntLit:
 @dataclass
 class FloatLit:
     value: float
+    raw: str = ''
     line: int = 0
     col: int = 0
 
@@ -127,13 +139,14 @@ class SliceExpr:
 class Call:
     func: Any
     args: List[Any]
+    type_args: List[Any] = field(default_factory=list)
     line: int = 0
     col: int = 0
 
 @dataclass
 class StructLit:
     type_name: str
-    fields: List[Any]  # list of (name, expr) tuples
+    fields: List[Any]   # list of (name, expr) tuples
     line: int = 0
     col: int = 0
 
@@ -222,6 +235,27 @@ class NullCheck:
     line: int = 0
     col: int = 0
 
+@dataclass
+class SizeOf:
+    """sizeof(T) or sizeof(expr)"""
+    operand: Any
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class OkExpr:
+    """ok(value) — construct a Result in the Ok state"""
+    value: Any
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class ErrExpr:
+    """err(value) — construct a Result in the Err state"""
+    value: Any
+    line: int = 0
+    col: int = 0
+
 
 # ── Statements ───────────────────────────────────────────────────────────────
 
@@ -258,6 +292,7 @@ class Return:
 
 @dataclass
 class Break:
+    value: Optional[Any] = None
     line: int = 0
     col: int = 0
 
@@ -339,6 +374,7 @@ class ExprStmt:
 @dataclass
 class UseDecl:
     path: str
+    alias: Optional[str] = None
     line: int = 0
     col: int = 0
 
@@ -355,6 +391,7 @@ class StructField:
     name: str
     type: Any
     annotations: List[str] = field(default_factory=list)
+    default_value: Optional[Any] = None
     line: int = 0
     col: int = 0
 
@@ -362,6 +399,7 @@ class StructField:
 class StructDecl:
     name: str
     fields: List[Any]
+    type_params: List[str] = field(default_factory=list)
     annotations: List[str] = field(default_factory=list)
     line: int = 0
     col: int = 0
@@ -402,6 +440,7 @@ class Param:
     name: str
     type: Any
     mutable: bool = False
+    default_value: Optional[Any] = None
     line: int = 0
     col: int = 0
 
@@ -411,9 +450,19 @@ class FnDecl:
     params: List[Any]
     ret_type: Optional[Any]
     body: Optional[Any]
+    type_params: List[str] = field(default_factory=list)
     annotations: List[str] = field(default_factory=list)
     is_method: bool = False
     self_type: Optional[str] = None
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class ImplBlock:
+    """impl TypeName<T> { fn method(self: *Self, ...) { ... } }"""
+    type_name: str
+    type_params: List[str]
+    methods: List[Any]
     line: int = 0
     col: int = 0
 

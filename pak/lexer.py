@@ -49,6 +49,12 @@ class TT(Enum):
     NOT = auto()
     CATCH = auto()
     AS = auto()
+    IMPL = auto()
+    SELF = auto()
+    OK = auto()
+    ERR = auto()
+    SIZEOF = auto()
+    ELIF = auto()
 
     # Annotations
     ANNOTATION = auto()  # @something
@@ -135,6 +141,12 @@ KEYWORDS = {
     'not': TT.NOT,
     'catch': TT.CATCH,
     'as': TT.AS,
+    'impl': TT.IMPL,
+    'self': TT.SELF,
+    'ok': TT.OK,
+    'err': TT.ERR,
+    'sizeof': TT.SIZEOF,
+    'elif': TT.ELIF,
     '_': TT.UNDERSCORE,
 }
 

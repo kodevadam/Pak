@@ -105,8 +105,40 @@ class Parser:
             return self.parse_static(annotations)
         elif tok.type == TT.LET:
             return self.parse_let(annotations)
+        elif tok.type == TT.IMPL:
+            return self.parse_impl()
         else:
             raise ParseError(f'Unexpected token at top level', tok)
+
+    def _parse_generic_params(self) -> List[str]:
+        """Parse optional <T, U, V> generic parameter list after a name."""
+        if not self.check(TT.LT):
+            return []
+        # Lookahead: make sure this is <IDENT (,IDENT)* > not a comparison
+        # Heuristic: all tokens until > should be idents or commas
+        i = self.pos + 1
+        params = []
+        while i < len(self.tokens):
+            t = self.tokens[i]
+            if t.type == TT.IDENT:
+                params.append(t.value)
+                i += 1
+            elif t.type == TT.COMMA:
+                i += 1
+            elif t.type == TT.GT:
+                break
+            else:
+                return []  # not a generic param list
+        else:
+            return []
+        # Commit: consume the < params >
+        self.advance()  # <
+        result = []
+        while not self.check(TT.GT) and not self.check(TT.EOF):
+            result.append(self.expect(TT.IDENT).value)
+            self.match(TT.COMMA)
+        self.expect(TT.GT)
+        return result
 
     # ── Top-level declarations ────────────────────────────────────────────────
 
@@ -114,7 +146,10 @@ class Parser:
         line, col = self.loc()
         self.expect(TT.USE)
         path = self.parse_dotted_name()
-        return ast.UseDecl(path=path, line=line, col=col)
+        alias = None
+        if self.match(TT.AS):
+            alias = self.expect(TT.IDENT).value
+        return ast.UseDecl(path=path, alias=alias, line=line, col=col)
 
     def parse_dotted_name(self) -> str:
         parts = [self.expect(TT.IDENT).value]
@@ -144,6 +179,7 @@ class Parser:
         line, col = self.loc()
         self.expect(TT.STRUCT)
         name = self.expect(TT.IDENT).value
+        type_params = self._parse_generic_params()
         self.expect(TT.LBRACE)
         fields = []
         while not self.check(TT.RBRACE) and not self.check(TT.EOF):
@@ -153,10 +189,15 @@ class Parser:
             fname = self.expect(TT.IDENT).value
             self.expect(TT.COLON)
             ftype = self.parse_type()
+            default_val = None
+            if self.match(TT.EQ):
+                default_val = self.parse_expr()
             self.match(TT.COMMA)
-            fields.append(ast.StructField(name=fname, type=ftype, annotations=f_annotations, line=line, col=col))
+            fields.append(ast.StructField(name=fname, type=ftype, annotations=f_annotations,
+                                          default_value=default_val, line=line, col=col))
         self.expect(TT.RBRACE)
-        return ast.StructDecl(name=name, fields=fields, annotations=annotations or [], line=line, col=col)
+        return ast.StructDecl(name=name, fields=fields, type_params=type_params,
+                              annotations=annotations or [], line=line, col=col)
 
     def parse_enum(self, annotations=None) -> ast.EnumDecl:
         line, col = self.loc()
@@ -210,14 +251,24 @@ class Parser:
         line, col = self.loc()
         self.expect(TT.FN)
         name = self.expect(TT.IDENT).value
+        # Optional generic type params: fn foo<T, U>(...)
+        type_params = self._parse_generic_params()
         self.expect(TT.LPAREN)
         params = []
         while not self.check(TT.RPAREN) and not self.check(TT.EOF):
             mut = bool(self.match(TT.MUT))
-            pname = self.expect(TT.IDENT).value
+            # Accept 'self' keyword or IDENT as param name
+            if self.check(TT.SELF):
+                pname = self.advance().value  # 'self'
+            else:
+                pname = self.expect(TT.IDENT).value
             self.expect(TT.COLON)
             ptype = self.parse_type()
-            params.append(ast.Param(name=pname, type=ptype, mutable=mut, line=line, col=col))
+            default_val = None
+            if self.match(TT.EQ):
+                default_val = self.parse_expr()
+            params.append(ast.Param(name=pname, type=ptype, mutable=mut,
+                                    default_value=default_val, line=line, col=col))
             self.match(TT.COMMA)
         self.expect(TT.RPAREN)
         ret_type = None
@@ -226,14 +277,49 @@ class Parser:
         body = None
         if self.check(TT.LBRACE):
             body = self.parse_block()
+        # Detect method: first param named 'self'
+        is_method = False
+        self_type = None
+        if params and params[0].name == 'self':
+            is_method = True
+            ptype = params[0].type
+            if isinstance(ptype, ast.TypePointer) and isinstance(ptype.inner, ast.TypeName):
+                self_type = ptype.inner.name
+            elif isinstance(ptype, ast.TypeName):
+                self_type = ptype.name
         return ast.FnDecl(name=name, params=params, ret_type=ret_type, body=body,
-                          annotations=annotations or [], line=line, col=col)
+                          type_params=type_params, annotations=annotations or [],
+                          is_method=is_method, self_type=self_type, line=line, col=col)
 
     def parse_entry(self) -> ast.EntryBlock:
         line, col = self.loc()
         self.expect(TT.ENTRY)
         body = self.parse_block()
         return ast.EntryBlock(body=body, line=line, col=col)
+
+    def parse_impl(self) -> ast.ImplBlock:
+        line, col = self.loc()
+        self.expect(TT.IMPL)
+        type_name = self.expect(TT.IDENT).value
+        type_params = self._parse_generic_params()
+        self.expect(TT.LBRACE)
+        methods = []
+        while not self.check(TT.RBRACE) and not self.check(TT.EOF):
+            ann = []
+            while self.check(TT.ANNOTATION):
+                ann.append(self.advance().value)
+            if self.check(TT.FN):
+                m = self.parse_fn(ann)
+                # Mark as method belonging to this type
+                m.is_method = True
+                if not m.self_type:
+                    m.self_type = type_name
+                methods.append(m)
+            else:
+                self.advance()  # skip unknown tokens
+        self.expect(TT.RBRACE)
+        return ast.ImplBlock(type_name=type_name, type_params=type_params,
+                             methods=methods, line=line, col=col)
 
     def parse_extern(self) -> ast.ExternBlock:
         line, col = self.loc()
@@ -271,14 +357,28 @@ class Parser:
             inner = self.parse_type()
             return ast.TypePointer(inner=inner, nullable=False, mutable=mut, line=line, col=col)
 
-        # []Type
+        # []Type  or  [N]Type  or  [T; N]  (Rust-style)
         if self.check(TT.LBRACKET):
             self.advance()
             if self.check(TT.RBRACKET):
                 self.advance()
                 inner = self.parse_type()
                 return ast.TypeSlice(inner=inner, line=line, col=col)
-            # [N]Type
+            # Peek ahead: if this is [T; N] (Rust style) the first expr will be a
+            # type name followed by SEMICOLON.  We do a speculative type parse.
+            save_pos = self.pos
+            try:
+                inner = self.parse_type()
+                if self.check(TT.SEMICOLON):
+                    self.advance()  # ;
+                    size = self.parse_expr()
+                    self.expect(TT.RBRACKET)
+                    return ast.TypeArray(size=size, inner=inner, line=line, col=col)
+                # Not [T; N] — roll back and fall through to [N]T
+                self.pos = save_pos
+            except Exception:
+                self.pos = save_pos
+            # [N]Type  (original syntax)
             size = self.parse_expr()
             self.expect(TT.RBRACKET)
             inner = self.parse_type()
@@ -318,7 +418,46 @@ class Parser:
             self.expect(TT.RPAREN)
             return ast.TypeOption(inner=inner, line=line, col=col)
 
+        # Generic type: Name<T, U>
+        if self.check(TT.LT):
+            # Check if this looks like generic args rather than a comparison
+            type_args = self._try_parse_type_args()
+            if type_args is not None:
+                return ast.TypeGeneric(name=name, args=type_args, line=line, col=col)
+
         return ast.TypeName(name=name, line=line, col=col)
+
+    def _try_parse_type_args(self) -> Optional[List[Any]]:
+        """Try to parse <T, U, V> as a list of type arguments.
+        Returns the list on success, None if this is not a generic type arg list.
+        """
+        # Lookahead: scan for matching >
+        i = self.pos + 1  # skip <
+        depth = 1
+        while i < len(self.tokens) and depth > 0:
+            t = self.tokens[i]
+            if t.type == TT.LT:
+                depth += 1
+            elif t.type == TT.GT:
+                depth -= 1
+            elif t.type in (TT.LBRACE, TT.RBRACE, TT.SEMICOLON, TT.EOF):
+                return None  # definitely not type args
+            i += 1
+        if depth != 0:
+            return None
+        # Try to parse as type args
+        save_pos = self.pos
+        self.advance()  # consume <
+        args = []
+        try:
+            while not self.check(TT.GT) and not self.check(TT.EOF):
+                args.append(self.parse_type())
+                self.match(TT.COMMA)
+            self.expect(TT.GT)
+            return args
+        except Exception:
+            self.pos = save_pos
+            return None
 
     # ── Statements ────────────────────────────────────────────────────────────
 
@@ -439,16 +578,27 @@ class Parser:
         then = self.parse_block()
         elif_branches = []
         else_b = None
-        while self.check(TT.ELSE):
-            self.advance()
-            if self.check(TT.IF):
+        while self.check(TT.ELSE) or self.check(TT.ELIF):
+            if self.check(TT.ELIF):
                 self.advance()
                 ec = self.parse_expr()
                 eb = self.parse_block()
                 elif_branches.append((ec, eb))
             else:
-                else_b = self.parse_block()
-                break
+                self.advance()  # else
+                if self.check(TT.IF):
+                    self.advance()
+                    ec = self.parse_expr()
+                    eb = self.parse_block()
+                    elif_branches.append((ec, eb))
+                elif self.check(TT.ELIF):
+                    self.advance()
+                    ec = self.parse_expr()
+                    eb = self.parse_block()
+                    elif_branches.append((ec, eb))
+                else:
+                    else_b = self.parse_block()
+                    break
         return ast.IfStmt(condition=cond, then=then, elif_branches=elif_branches,
                           else_branch=else_b, line=line, col=col)
 
@@ -563,10 +713,13 @@ class Parser:
         expr = self.parse_or()
         if self.match(TT.CATCH):
             binding = None
+            # Accept: catch |e| { } or catch e { }
             if self.check(TT.PIPE):
                 self.advance()
                 binding = self.expect(TT.IDENT).value
                 self.expect(TT.PIPE)
+            elif self.check(TT.IDENT) and self.peek(1).type == TT.LBRACE:
+                binding = self.advance().value
             handler = self.parse_block()
             return ast.CatchExpr(expr=expr, binding=binding, handler=handler, line=line, col=col)
         return expr
@@ -704,7 +857,11 @@ class Parser:
                         args.append(self.parse_expr())
                     self.match(TT.COMMA)
                 self.expect(TT.RPAREN)
-                expr = ast.Call(func=expr, args=args, line=line, col=col)
+                # Pick up any pending generic type args stored on the func ident
+                type_args = getattr(expr, '_pending_type_args', [])
+                if hasattr(expr, '_pending_type_args'):
+                    del expr._pending_type_args
+                expr = ast.Call(func=expr, args=args, type_args=type_args, line=line, col=col)
             elif self.check(TT.LBRACKET):
                 self.advance()
                 idx = self.parse_expr()
@@ -772,6 +929,11 @@ class Parser:
             self.advance()
             return ast.Ident(name='_', line=line, col=col)
 
+        # 'self' used as an expression (inside method bodies)
+        if tok.type == TT.SELF:
+            self.advance()
+            return ast.Ident(name='self', line=line, col=col)
+
         # Grouped expression or tuple
         if tok.type == TT.LPAREN:
             self.advance()
@@ -798,6 +960,38 @@ class Parser:
             self.expect(TT.RBRACKET)
             return ast.ArrayLit(elements=elements, line=line, col=col)
 
+        # ok(value) — Result Ok constructor
+        if tok.type == TT.OK:
+            self.advance()
+            self.expect(TT.LPAREN)
+            val = self.parse_expr()
+            self.expect(TT.RPAREN)
+            return ast.OkExpr(value=val, line=line, col=col)
+
+        # err(value) — Result Err constructor
+        if tok.type == TT.ERR:
+            self.advance()
+            self.expect(TT.LPAREN)
+            val = self.parse_expr()
+            self.expect(TT.RPAREN)
+            return ast.ErrExpr(value=val, line=line, col=col)
+
+        # sizeof(T) or sizeof(expr)
+        if tok.type == TT.SIZEOF:
+            self.advance()
+            self.expect(TT.LPAREN)
+            # Try to parse as type first, fall back to expression
+            save = self.pos
+            try:
+                operand = self.parse_type()
+                if not self.check(TT.RPAREN):
+                    raise Exception()
+            except Exception:
+                self.pos = save
+                operand = self.parse_expr()
+            self.expect(TT.RPAREN)
+            return ast.SizeOf(operand=operand, line=line, col=col)
+
         # .variant_name (enum dot access)
         if tok.type == TT.DOT:
             self.advance()
@@ -807,11 +1001,21 @@ class Parser:
         # Range: 0..10
         # (Handled in binary ops above, but start..end as primary)
 
-        # Identifier or struct literal
+        # Identifier or struct literal or generic call
         if tok.type == TT.IDENT:
             name = self.advance().value
-            # Look ahead: if next is { and previous token doesn't suggest we're inside a block
-            # Struct literal: TypeName { field: val, ... }
+
+            # Generic struct literal: TypeName<T> { field: val, ... }
+            type_args = []
+            if self.check(TT.LT):
+                saved = self.pos
+                try:
+                    type_args = self._parse_generic_params()
+                except Exception:
+                    self.pos = saved
+                    type_args = []
+
+            # Look ahead: Struct literal: TypeName { field: val, ... }
             if self.check(TT.LBRACE) and self._is_struct_literal_context():
                 self.advance()
                 fields = []
@@ -824,15 +1028,24 @@ class Parser:
                 self.expect(TT.RBRACE)
                 return ast.StructLit(type_name=name, fields=fields, line=line, col=col)
 
-            # Range: name..end (if name is numeric ident - unlikely, but handle)
-            if self.check(TT.DOTDOT):
+            # Range: name..end
+            if self.check(TT.DOTDOT) and not type_args:
                 self.advance()
                 end = None
                 if not self.check(TT.RBRACE) and not self.check(TT.COMMA) and not self.check(TT.RPAREN):
                     end = self.parse_primary()
                 return ast.RangeExpr(start=ast.Ident(name=name, line=line, col=col), end=end, line=line, col=col)
 
-            return ast.Ident(name=name, line=line, col=col)
+            ident = ast.Ident(name=name, line=line, col=col)
+            # If we parsed type args but the next token isn't (, back off the type args
+            # They'll be used if we see ( in parse_postfix
+            if type_args and not self.check(TT.LPAREN):
+                # Discard type args, they were probably a comparison
+                pass
+            elif type_args:
+                # Store type args for pick-up in parse_postfix as a temporary node
+                ident._pending_type_args = type_args
+            return ident
 
         if tok.type == TT.INT:
             t = self.advance()

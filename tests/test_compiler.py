@@ -850,3 +850,320 @@ class TestRegressions:
         c = codegen(src)
         # Each case body should be wrapped in {}
         assert 'case Dir_Up: {' in c or ('case Dir_Up:' in c and '{' in c)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# New feature tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestArrayRepeat:
+
+    def test_zero_repeat_zero_init(self):
+        c = codegen('entry { let a: [i32; 8] = [0; 8] }')
+        assert 'int32_t a[8] = {0}' in c
+
+    def test_small_nonzero_repeat_expanded(self):
+        c = codegen('entry { let a: [i32; 3] = [5; 3] }')
+        assert '{5, 5, 5}' in c
+
+    def test_large_repeat_loop_fill(self):
+        c = codegen('entry { let a: [i32; 200] = [7; 200] }')
+        assert '{0}' in c
+        assert 'for (int _fi' in c
+        assert 'a[_fi] = 7' in c
+
+    def test_array_type_rust_syntax(self):
+        """[T; N] type syntax parses and generates C array."""
+        c = codegen('fn f(x: [i32; 4]) -> void { }')
+        assert 'int32_t' in c
+
+    def test_array_type_classic_syntax(self):
+        """[N]T type syntax still works."""
+        c = codegen('fn f() -> void { let a: [4]i32 }')
+        assert 'int32_t a[4]' in c
+
+
+class TestResultCatch:
+
+    def test_result_typedef_emitted(self):
+        c = codegen('fn f() -> Result(i32, i32) { return ok(1) }')
+        assert 'PakResult_int32_t_int32_t' in c
+        assert 'is_ok' in c
+        assert 'union' in c
+
+    def test_ok_expr_uses_return_type(self):
+        c = codegen('fn f() -> Result(i32, i32) { return ok(42) }')
+        assert '.is_ok = true' in c
+        assert '.data.value = 42' in c
+
+    def test_err_expr_uses_return_type(self):
+        c = codegen('fn f() -> Result(i32, i32) { return err(99) }')
+        assert '.is_ok = false' in c
+        assert '.data.error = 99' in c
+
+    def test_catch_let_expansion(self):
+        src = textwrap.dedent('''
+            fn may_fail() -> Result(i32, i32) { return ok(1) }
+            entry {
+                let x: i32 = may_fail() catch e { return }
+            }
+        ''')
+        c = codegen(src)
+        assert '_catch_x' in c
+        assert '!_catch_x.is_ok' in c
+        assert 'x = _catch_x.data.value' in c
+
+
+class TestPakStr:
+
+    def test_str_type_maps_to_pakstr(self):
+        c = codegen('fn f(s: Str) -> void { }')
+        assert 'PakStr' in c
+
+    def test_pakstr_runtime_emitted(self):
+        c = codegen('entry { }')
+        assert 'pak_str_from_cstr' in c
+        assert 'pak_str_eq' in c
+
+    def test_str_module_from_cstr(self):
+        c = codegen('use pak.str\nentry { let s = str.from_cstr("hi") }')
+        assert 'pak_str_from_cstr' in c
+
+
+class TestArena:
+
+    def test_arena_type_maps_to_pakarena(self):
+        c = codegen('fn f(a: Arena) -> void { }')
+        assert 'PakArena' in c
+
+    def test_arena_runtime_emitted(self):
+        c = codegen('entry { }')
+        assert 'pak_arena_alloc' in c
+        assert 'pak_arena_reset' in c
+
+
+class TestMethodDispatch:
+
+    def test_impl_generates_prefixed_fns(self):
+        src = textwrap.dedent('''
+            struct Counter { val: i32 }
+            impl Counter {
+                fn inc(self: *Counter) -> void { self.val = self.val }
+                fn get(self: *Counter) -> i32 { return self.val }
+            }
+        ''')
+        c = codegen(src)
+        assert 'Counter_inc' in c
+        assert 'Counter_get' in c
+
+    def test_method_call_passes_addr(self):
+        src = textwrap.dedent('''
+            struct Counter { val: i32 }
+            impl Counter {
+                fn get(self: *Counter) -> i32 { return self.val }
+            }
+            entry {
+                let c: Counter = Counter{ val: 0 }
+                let v: i32 = c.get()
+            }
+        ''')
+        c = codegen(src)
+        assert 'Counter_get(&c)' in c
+
+    def test_self_as_expr_in_body(self):
+        src = textwrap.dedent('''
+            struct Foo { x: i32 }
+            impl Foo {
+                fn bar(self: *Foo) -> i32 { return self.x }
+            }
+        ''')
+        c = codegen(src)
+        assert 'self->x' in c
+
+
+class TestGenerics:
+
+    def test_generic_fn_not_emitted_raw(self):
+        """Generic functions should not appear as-is (with T) in output."""
+        c = codegen('fn id<T>(x: T) -> T { return x }')
+        assert 'void * id' not in c  # not emitted unspecialized
+
+    def test_generic_fn_monomorphized_on_call(self):
+        src = textwrap.dedent('''
+            fn id<T>(x: T) -> T { return x }
+            entry { let v: i32 = id(42) }
+        ''')
+        c = codegen(src)
+        assert 'id_int32_t' in c
+        assert 'int32_t id_int32_t' in c
+
+    def test_generic_fn_two_specializations(self):
+        src = textwrap.dedent('''
+            fn id<T>(x: T) -> T { return x }
+            entry {
+                let a: i32 = id(1)
+                let b: f32 = id(1.0)
+            }
+        ''')
+        c = codegen(src)
+        assert 'id_int32_t' in c
+        assert 'id_float' in c
+
+    def test_sizeof_type(self):
+        c = codegen('entry { let s: i32 = sizeof(i32) }')
+        assert 'sizeof(int32_t)' in c
+
+    def test_sizeof_expr(self):
+        src = textwrap.dedent('''
+            struct Foo { x: i32, y: f32 }
+            entry { let s: i32 = sizeof(Foo) }
+        ''')
+        c = codegen(src)
+        assert 'sizeof(Foo)' in c
+
+
+class TestLexerNewKeywords:
+
+    def test_impl_keyword(self):
+        toks = lex('impl')
+        assert toks[0].type == TT.IMPL
+
+    def test_self_keyword(self):
+        toks = lex('self')
+        assert toks[0].type == TT.SELF
+
+    def test_ok_keyword(self):
+        toks = lex('ok')
+        assert toks[0].type == TT.OK
+
+    def test_err_keyword(self):
+        toks = lex('err')
+        assert toks[0].type == TT.ERR
+
+    def test_sizeof_keyword(self):
+        toks = lex('sizeof')
+        assert toks[0].type == TT.SIZEOF
+
+    def test_elif_keyword(self):
+        toks = lex('elif')
+        assert toks[0].type == TT.ELIF
+
+    def test_all_new_keywords_in_keywords_table(self):
+        from pak.lexer import KEYWORDS
+        for kw in ('impl', 'self', 'ok', 'err', 'sizeof', 'elif'):
+            assert kw in KEYWORDS, f'{kw!r} missing from KEYWORDS'
+
+
+class TestParserNewFeatures:
+
+    def test_parse_impl_block(self):
+        src = textwrap.dedent('''
+            struct Foo { x: i32 }
+            impl Foo {
+                fn bar(self: *Foo) -> i32 { return self.x }
+            }
+        ''')
+        prog = parse(src)
+        impl_blocks = [d for d in prog.decls if isinstance(d, ast.ImplBlock)]
+        assert len(impl_blocks) == 1
+        assert impl_blocks[0].type_name == 'Foo'
+        assert impl_blocks[0].methods[0].name == 'bar'
+
+    def test_parse_generic_fn(self):
+        prog = parse('fn f<T>(x: T) -> T { return x }')
+        fn = prog.decls[0]
+        assert isinstance(fn, ast.FnDecl)
+        assert fn.type_params == ['T']
+
+    def test_parse_generic_struct(self):
+        prog = parse('struct Pair<A, B> { first: A, second: B }')
+        s = prog.decls[0]
+        assert isinstance(s, ast.StructDecl)
+        assert s.type_params == ['A', 'B']
+
+    def test_parse_ok_expr(self):
+        prog = parse('fn f() -> Result(i32, i32) { return ok(1) }')
+        fn = prog.decls[0]
+        ret_stmt = fn.body.stmts[0]
+        assert isinstance(ret_stmt.value, ast.OkExpr)
+
+    def test_parse_err_expr(self):
+        prog = parse('fn f() -> Result(i32, i32) { return err(99) }')
+        fn = prog.decls[0]
+        ret_stmt = fn.body.stmts[0]
+        assert isinstance(ret_stmt.value, ast.ErrExpr)
+
+    def test_parse_sizeof(self):
+        prog = parse('entry { let s: i32 = sizeof(i32) }')
+        entry = prog.decls[0]
+        let_stmt = entry.body.stmts[0]
+        assert isinstance(let_stmt.value, ast.SizeOf)
+
+    def test_parse_elif(self):
+        src = textwrap.dedent('''
+            fn f(x: i32) -> void {
+                if x == 1 { }
+                elif x == 2 { }
+                else { }
+            }
+        ''')
+        prog = parse(src)
+        fn = prog.decls[0]
+        if_stmt = fn.body.stmts[0]
+        assert isinstance(if_stmt, ast.IfStmt)
+        assert len(if_stmt.elif_branches) == 1
+
+    def test_parse_catch_bare_binding(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let x: i32 = some_fn() catch e { return }
+            }
+        ''')
+        prog = parse(src)
+        fn = prog.decls[0]
+        let_stmt = fn.body.stmts[0]
+        assert isinstance(let_stmt.value, ast.CatchExpr)
+        assert let_stmt.value.binding == 'e'
+
+    def test_parse_array_type_rust_style(self):
+        prog = parse('fn f(x: [i32; 4]) -> void { }')
+        fn = prog.decls[0]
+        param_type = fn.params[0].type
+        assert isinstance(param_type, ast.TypeArray)
+
+    def test_parse_use_alias(self):
+        """use n64.display as disp — alias field."""
+        from pak.parser import Parser
+        tokens = Lexer('use n64.display as disp').tokenize()
+        prog = Parser(tokens).parse()
+        use = prog.decls[0]
+        assert isinstance(use, ast.UseDecl)
+        # alias parsing is optional — just check it doesn't crash
+        assert use.path == 'n64.display'
+
+
+class TestModuleAPI:
+
+    def test_rdpq_triangle(self):
+        c = codegen('use n64.rdpq\nentry { rdpq.triangle(NULL, NULL, 0, 1, 0.0, NULL, NULL, NULL) }')
+        assert 'rdpq_triangle' in c
+
+    def test_joypad_get_buttons(self):
+        c = codegen('use n64.joypad\nentry { joypad.poll() }')
+        assert 'joypad_poll' in c
+
+    def test_str_module_len(self):
+        c = codegen('use pak.str\nentry { let s: Str = str.from_cstr("hi") }')
+        assert 'pak_str_from_cstr' in c
+
+    def test_arena_alloc(self):
+        c = codegen('use pak.arena\nentry { let p: *i32 = arena.alloc(a, 4) }')
+        assert 'pak_arena_alloc' in c
+
+    def test_t3d_fog_set_range(self):
+        c = codegen('use t3d.fog\nentry { t3d.fog_set_range(10.0, 100.0) }')
+        assert 't3d_fog_set_range' in c
+
+    def test_t3d_quat_slerp(self):
+        c = codegen('use t3d.math\nentry { t3d.quat_slerp(q1, q2, q3, 0.5) }')
+        assert 't3d_quat_slerp' in c

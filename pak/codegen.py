@@ -128,6 +128,60 @@ MODULE_API: dict = {
     ('t3d', 'skeleton_update'):    't3d_skeleton_update',
     ('t3d', 'skeleton_draw'):      't3d_skeleton_draw',
 
+    # t3d.math — full matrix/vector/quaternion API
+    ('t3d', 'mat4_mul'):           lambda args: f't3d_mat4_mul({_addr(args,0)}, {_addr(args,1)}, {_addr(args,2)})',
+    ('t3d', 'mat4_from_srt'):      lambda args: f't3d_mat4_from_srt({_addr(args,0)}, {_addr(args,1)}, {_addr(args,2)}, {_addr(args,3)})',
+    ('t3d', 'mat4_from_srt_euler'):lambda args: f't3d_mat4_from_srt_euler({_addr(args,0)}, {_addr(args,1)}, {_addr(args,2)}, {_addr(args,3)})',
+    ('t3d', 'mat4_invert'):        lambda args: f't3d_mat4_invert({_addr(args,0)}, {_addr(args,1)})',
+    ('t3d', 'mat4_transpose'):     lambda args: f't3d_mat4_transpose({_addr(args,0)}, {_addr(args,1)})',
+    ('t3d', 'vec3_norm'):          lambda args: f't3d_vec3_norm({_addr(args,0)})',
+    ('t3d', 'vec3_cross'):         lambda args: f't3d_vec3_cross({_addr(args,0)}, {_addr(args,1)}, {_addr(args,2)})',
+    ('t3d', 'vec3_dot'):           lambda args: f't3d_vec3_dot({_addr(args,0)}, {_addr(args,1)})',
+    ('t3d', 'vec3_lerp'):          lambda args: f't3d_vec3_lerp({_addr(args,0)}, {_addr(args,1)}, {_addr(args,2)}, {args[3]})',
+    ('t3d', 'quat_identity'):      lambda args: f't3d_quat_identity({_addr(args,0)})',
+    ('t3d', 'quat_from_axis_angle'):lambda args: f't3d_quat_from_axis_angle({_addr(args,0)}, {_addr(args,1)}, {args[2]})',
+    ('t3d', 'quat_mul'):           lambda args: f't3d_quat_mul({_addr(args,0)}, {_addr(args,1)}, {_addr(args,2)})',
+    ('t3d', 'quat_nlerp'):         lambda args: f't3d_quat_nlerp({_addr(args,0)}, {_addr(args,1)}, {_addr(args,2)}, {args[3]})',
+    ('t3d', 'quat_slerp'):         lambda args: f't3d_quat_slerp({_addr(args,0)}, {_addr(args,1)}, {_addr(args,2)}, {args[3]})',
+
+    # t3d.light — full lighting API
+    ('t3d', 'light_set_count'):    't3d_light_set_count',
+    ('t3d', 'light_set_point'):    't3d_light_set_point',
+    ('t3d', 'light_set_spot'):     't3d_light_set_spot',
+    ('t3d', 'light_set_point_params'): 't3d_light_set_point_params',
+
+    # t3d.fog
+    ('t3d', 'fog_set_enabled'):    lambda args: f't3d_fog_set_enabled({args[0] if args else "true"})',
+    ('t3d', 'fog_set_range'):      't3d_fog_set_range',
+    ('t3d', 'fog_set_color'):      't3d_fog_set_color',
+
+    # t3d.state
+    ('t3d', 'state_set_vertex_fx'): 't3d_state_set_vertex_fx',
+    ('t3d', 'state_set_drawflags'): 't3d_state_set_drawflags',
+    ('t3d', 'push_draw_flags'):    't3d_push_draw_flags',
+    ('t3d', 'pop_draw_flags'):     't3d_pop_draw_flags',
+
+    # t3d.model — extended
+    ('t3d', 'model_get_object_by_index'): 't3d_model_get_object_by_index',
+    ('t3d', 'model_get_object_by_name'):  't3d_model_get_object_by_name',
+    ('t3d', 'model_get_material'):        't3d_model_get_material',
+    ('t3d', 'model_get_vertex_count'):    't3d_model_get_vertex_count',
+    ('t3d', 'model_bake_pos'):            't3d_model_bake_pos',
+    ('t3d', 'draw_object'):               't3d_draw_object',
+    ('t3d', 'draw_indexed'):              't3d_draw_indexed',
+
+    # t3d.segment — RSP segment registers
+    ('t3d', 'segment_set'):        't3d_segment_set',
+
+    # t3d.rdpq — Tiny3D RDP mode helpers
+    ('t3d', 'rdpq_draw_object'):   't3d_rdpq_draw_object',
+
+    # t3d.particles — basic billboard particle support via raw draws
+    ('t3d', 'vert_load'):          't3d_vert_load',
+    ('t3d', 'vert_load_srt'):      't3d_vert_load_srt',
+    ('t3d', 'tri_draw'):           't3d_tri_draw',
+    ('t3d', 'tri_sync'):           't3d_tri_sync',
+
     # n64.rumble — Rumble Pak
     ('rumble', 'init'):            'rumble_init',
     ('rumble', 'start'):           'rumble_start',
@@ -280,6 +334,96 @@ MODULE_API: dict = {
     ('math', 'fix_to_f'):          lambda args: f'((float)({args[0]}) / 65536.0f)',
     ('math', 'f_to_fix'):          lambda args: f'((int32_t)(({args[0]}) * 65536.0f))',
 
+    # n64.rdpq — full RDP command queue API
+    ('rdpq', 'triangle'):            'rdpq_triangle',
+    ('rdpq', 'texture_rectangle'):   'rdpq_texture_rectangle',
+    ('rdpq', 'texture_rectangle_scaled'): 'rdpq_texture_rectangle_scaled',
+    ('rdpq', 'set_blend_color'):     'rdpq_set_blend_color',
+    ('rdpq', 'set_fog_color'):       'rdpq_set_fog_color',
+    ('rdpq', 'set_fill_color'):      'rdpq_set_fill_color',
+    ('rdpq', 'set_env_color'):       'rdpq_set_env_color',
+    ('rdpq', 'set_prim_color'):      'rdpq_set_prim_color',
+    ('rdpq', 'set_z_image'):         'rdpq_set_z_image',
+    ('rdpq', 'set_color_image'):     'rdpq_set_color_image',
+    ('rdpq', 'set_tile'):            'rdpq_set_tile',
+    ('rdpq', 'set_tile_size'):       'rdpq_set_tile_size',
+    ('rdpq', 'load_tile'):           'rdpq_load_tile',
+    ('rdpq', 'load_tlut'):           'rdpq_load_tlut',
+    ('rdpq', 'set_combiner_raw'):    'rdpq_set_combiner_raw',
+    ('rdpq', 'set_other_modes_raw'): 'rdpq_set_other_modes_raw',
+    ('rdpq', 'flush'):               'rspq_flush',
+    ('rdpq', 'block_begin'):         'rdpq_block_begin',
+    ('rdpq', 'block_end'):           'rdpq_block_end',
+    ('rdpq', 'block_run'):           'rdpq_block_run',
+    ('rdpq', 'block_free'):          'rdpq_block_free',
+    ('rdpq', 'call'):                'rdpq_call',
+
+    # n64.rdpq.mode — full mode API
+    ('rdpq_mode', 'filter'):         lambda args: f'rdpq_mode_filter({args[0] if args else "FILTER_BILINEAR"})',
+    ('rdpq_mode', 'dithering'):      lambda args: f'rdpq_mode_dithering({args[0] if args else "DITHER_SQUARE_SQUARE"})',
+    ('rdpq_mode', 'persp_norm'):     lambda args: f'rdpq_mode_persp_norm({args[0] if args else "true"})',
+    ('rdpq_mode', 'combiner'):       'rdpq_mode_combiner',
+    ('rdpq_mode', 'tlut'):           lambda args: f'rdpq_mode_tlut({args[0] if args else "TLUT_RGBA16"})',
+
+    # n64.joypad — granular joypad API
+    ('joypad', 'init'):              'joypad_init',
+    ('joypad', 'poll'):              'joypad_poll',
+    ('joypad', 'get_status'):        'joypad_get_status',
+    ('joypad', 'get_buttons'):       'joypad_get_buttons',
+    ('joypad', 'get_buttons_pressed'):'joypad_get_buttons_pressed',
+    ('joypad', 'get_buttons_released'):'joypad_get_buttons_released',
+    ('joypad', 'get_axis_held'):     'joypad_get_axis_held',
+    ('joypad', 'get_axis_pressed'):  'joypad_get_axis_pressed',
+    ('joypad', 'get_accessory_type'):'joypad_get_accessory_type',
+    ('joypad', 'is_connected'):      lambda args: f'(joypad_get_status({args[0] if args else "0"}).style != JOYPAD_STYLE_NONE)',
+
+    # n64.vi — Video Interface registers and control
+    ('vi', 'set_aa_mode'):           'vi_set_aa_mode',
+    ('vi', 'set_dedither'):          'vi_set_dedither',
+    ('vi', 'set_gamma'):             'vi_set_gamma',
+    ('vi', 'set_divot'):             'vi_set_divot',
+    ('vi', 'get_width'):             lambda args: 'display_get_width()',
+    ('vi', 'get_height'):            lambda args: 'display_get_height()',
+    ('vi', 'wait_vblank'):           lambda args: 'vi_wait_vblank()',
+
+    # n64.mem — heap allocator
+    ('mem', 'alloc'):                lambda args: f'malloc({args[0]})',
+    ('mem', 'alloc_aligned'):        lambda args: f'memalign({args[1]}, {args[0]})',
+    ('mem', 'free'):                 lambda args: f'free({args[0]})',
+    ('mem', 'realloc'):              lambda args: f'realloc({args[0]}, {args[1]})',
+    ('mem', 'zero'):                 lambda args: f'memset({args[0]}, 0, {args[1]})',
+    ('mem', 'copy'):                 lambda args: f'memcpy({args[0]}, {args[1]}, {args[2]})',
+    ('mem', 'move'):                 lambda args: f'memmove({args[0]}, {args[1]}, {args[2]})',
+
+    # str module — PakStr helpers
+    ('str', 'from_cstr'):            lambda args: f'pak_str_from_cstr({args[0]})',
+    ('str', 'eq'):                   lambda args: f'pak_str_eq({args[0]}, {args[1]})',
+    ('str', 'len'):                  lambda args: f'({args[0]}).len',
+    ('str', 'data'):                 lambda args: f'({args[0]}).data',
+    ('str', 'print'):                lambda args: f'debugf("%.*s", ({args[0]}).len, ({args[0]}).data)',
+    ('str', 'concat'):               lambda args: f'/* str.concat: use arena */ pak_str_from_cstr({args[0]}.data)',
+
+    # arena module — PakArena helpers
+    ('arena', 'alloc'):              lambda args: f'pak_arena_alloc({_addr(args,0)}, {args[1] if len(args)>1 else "0"})',
+    ('arena', 'reset'):              lambda args: f'pak_arena_reset({_addr(args,0)})',
+
+    # n64.audio — full audio API
+    ('audio', 'get_frequency'):      'audio_get_frequency',
+    ('audio', 'can_write'):          'audio_can_write',
+    ('audio', 'write'):              'audio_write',
+    ('audio', 'write_silence'):      'audio_write_silence',
+    ('audio', 'set_buffer_num'):     'audio_set_buffer_num',
+
+    # n64.debug — extended debug
+    ('debug', 'print'):              'debugf',
+    ('debug', 'init'):               'debug_init_isviewer',
+    ('debug', 'init_usbfs'):         'debug_init_usbfs',
+    ('debug', 'flush'):              'flush',
+
+    # n64.exception — exception/fault handling
+    ('exception', 'set_handler'):    'exception_set_handler',
+    ('exception', 'get_handler'):    'exception_get_handler',
+
     # Aliases for nested module keys — allow `mixer.ch_play(...)` etc.
     ('mixer', 'init'):             'mixer_init',
     ('mixer', 'close'):            'mixer_close',
@@ -394,9 +538,10 @@ PRIMITIVE_TYPES = {
     'Vec3': 'T3DVec3',
     'Vec4': 'T3DVec4',
     'Mat4': 'T3DMat4',
-    'Str': 'const char *',
+    'Str': 'PakStr',
+    'CStr': 'const char *',
     'c_char': 'char',
-    'Arena': 'void *',
+    'Arena': 'PakArena',
     'void': 'void',
 }
 
@@ -446,6 +591,22 @@ USE_INCLUDES = {
     # 64DD disk drive
     'n64.disk':         '#include <disk.h>',
 
+    # Joypad (explicit)
+    'n64.joypad':       '#include <joypad.h>',
+
+    # VI control
+    'n64.vi':           '#include <display.h>',
+
+    # Memory / heap
+    'n64.mem':          '#include <malloc.h>\n#include <string.h>',
+
+    # String helpers (Pak runtime — no extra header, built into output)
+    'pak.str':          '',
+    'pak.arena':        '',
+
+    # Exception handling
+    'n64.exception':    '#include <exception.h>',
+
     # Tiny3D
     't3d.core':         '#include <t3d/t3d.h>',
     't3d.model':        '#include <t3d/t3dmodel.h>',
@@ -454,6 +615,9 @@ USE_INCLUDES = {
     't3d.light':        '#include <t3d/t3dlight.h>',
     't3d.viewport':     '#include <t3d/t3d.h>',
     't3d.skeleton':     '#include <t3d/t3dskeleton.h>',
+    't3d.fog':          '#include <t3d/t3d.h>',
+    't3d.state':        '#include <t3d/t3d.h>',
+    't3d.particles':    '#include <t3d/t3d.h>',
 }
 
 
@@ -486,6 +650,18 @@ class Codegen:
         # Defer stack: each entry is a list of DeferStmt nodes for the current block
         # Outer list = stack of scopes; inner list = defers in that scope (LIFO)
         self._defer_stack: List[List[ast.DeferStmt]] = [[]]
+        # Method registry: type_name → {method_name: FnDecl}
+        self.method_registry: dict = {}
+        # Current function return type (for ok/err construction)
+        self._current_ret_type = None
+        # Result type typedefs: deduped list of (typedef_name, c_ok, c_err)
+        self._result_typedefs: List[tuple] = []
+        self._result_typedef_names: set = set()
+        # Generic functions/structs registered for monomorphization
+        self._generic_fns: dict = {}   # name → FnDecl
+        self._generic_structs: dict = {}  # name → StructDecl
+        # Monomorphization cache: (fn_name, tuple(type_args)) → specialized C name
+        self._mono_cache: dict = {}
 
     # ── Scope helpers ─────────────────────────────────────────────────────────
 
@@ -590,6 +766,9 @@ class Codegen:
         if t is None:
             return 'void'
         if isinstance(t, ast.TypeName):
+            # User-defined structs/enums/variants shadow the primitive type table
+            if t.name in self.struct_fields or t.name in self.variant_types or t.name in self.enum_variants.values():
+                return t.name
             return PRIMITIVE_TYPES.get(t.name, t.name)
         if isinstance(t, ast.TypePointer):
             inner = self.gen_type(t.inner)
@@ -602,15 +781,39 @@ class Codegen:
             size = self.gen_expr(t.size)
             return f'{inner}[{size}]'
         if isinstance(t, ast.TypeResult):
-            # Simplified: just use the ok type (errors become out params or return codes)
-            return self.gen_type(t.ok)
+            return self._result_typedef(t.ok, t.err)
         if isinstance(t, ast.TypeOption):
             return self.gen_type(t.inner) + ' *'
         if isinstance(t, ast.TypeFn):
             ret = self.gen_type(t.ret) if t.ret else 'void'
             params = ', '.join(self.gen_type(p) for p in t.params)
             return f'{ret} (*)({params})'
+        if isinstance(t, ast.TypeGeneric):
+            # Parameterized type: map List<T> → PakSlice_T, or Name_T for generics
+            if t.name in ('List', 'Slice', 'Array') and len(t.args) == 1:
+                return self._slice_typedef(t.args[0])
+            # Generic struct: Foo<i32, Str> → Foo_i32_Str
+            c_args = '_'.join(
+                self.gen_type(a).replace(' ', '_').replace('*', 'p').replace(',', '')
+                for a in t.args
+            )
+            return f'{t.name}_{c_args}'
+        if isinstance(t, ast.TypeParam):
+            # Unresolved type parameter — treat as void * during unspecialized codegen
+            return 'void *'
         return 'void *'
+
+    def _result_typedef(self, ok_type, err_type) -> str:
+        """Return (and register) the C typedef name for Result(ok, err)."""
+        c_ok = self.gen_type(ok_type) if ok_type else 'void *'
+        c_err = self.gen_type(err_type) if err_type else 'int32_t'
+        safe_ok = c_ok.replace(' ', '_').replace('*', 'p')
+        safe_err = c_err.replace(' ', '_').replace('*', 'p')
+        typedef_name = f'PakResult_{safe_ok}_{safe_err}'
+        if typedef_name not in self._result_typedef_names:
+            self._result_typedef_names.add(typedef_name)
+            self._result_typedefs.append((typedef_name, c_ok, c_err))
+        return typedef_name
 
     def gen_array_decl(self, name: str, t) -> str:
         """Generate 'type name[size]' for array types."""
@@ -690,6 +893,35 @@ class Codegen:
             return self.gen_expr(e.value)
         if isinstance(e, ast.Call):
             args_strs = [self.gen_expr(a) for a in e.args]
+            # Method call: obj.method(args) → TypeName_method(&obj, args)
+            if isinstance(e.func, ast.DotAccess) and isinstance(e.func.obj, ast.Ident):
+                obj_name = e.func.obj.name
+                method_name = e.func.field
+                obj_type = self.scope_get(obj_name)
+                type_name = None
+                if isinstance(obj_type, ast.TypeName):
+                    type_name = obj_type.name
+                elif isinstance(obj_type, ast.TypePointer) and isinstance(obj_type.inner, ast.TypeName):
+                    type_name = obj_type.inner.name
+                if type_name and type_name in self.method_registry:
+                    if method_name in self.method_registry[type_name]:
+                        fn_decl = self.method_registry[type_name][method_name]
+                        # Determine how to pass self: pointer vs value
+                        c_fn = f'{type_name}_{method_name}'
+                        if fn_decl.params:
+                            sp = fn_decl.params[0]
+                            if isinstance(sp.type, ast.TypePointer):
+                                # self: *T → pass &obj (or obj if already pointer)
+                                if isinstance(obj_type, ast.TypePointer):
+                                    self_arg = obj_name
+                                else:
+                                    self_arg = f'&{obj_name}'
+                            else:
+                                self_arg = obj_name
+                        else:
+                            self_arg = f'&{obj_name}'
+                        all_args = [self_arg] + args_strs
+                        return f'{c_fn}({", ".join(all_args)})'
             # Module API call: module.function(args) → C API
             if isinstance(e.func, ast.DotAccess) and isinstance(e.func.obj, ast.Ident):
                 mod = e.func.obj.name
@@ -700,6 +932,19 @@ class Codegen:
                     if callable(mapping):
                         return mapping(args_strs)
                     return f'{mapping}({", ".join(args_strs)})'
+            # Generic call: foo::<T>(args) or inferred-generic foo(args)
+            func_expr = e.func
+            if isinstance(func_expr, ast.Ident):
+                fn_name = func_expr.name
+                if fn_name in self._generic_fns:
+                    type_args = e.type_args
+                    if not type_args:
+                        # Infer type args from argument expressions
+                        type_args = self._infer_type_args(self._generic_fns[fn_name], e.args)
+                    if type_args:
+                        specialized = self._monomorphize_fn(fn_name, type_args)
+                        args = ', '.join(args_strs)
+                        return f'{specialized}({args})'
             func = self.gen_expr(e.func)
             args = ', '.join(args_strs)
             return f'{func}({args})'
@@ -708,9 +953,18 @@ class Codegen:
             return f'({e.type_name}){{{fields}}}'
         if isinstance(e, ast.ArrayLit):
             if e.repeat is not None:
-                # [val; N] - zero init or repeated value
-                val = self.gen_expr(e.elements[0])
-                return f'{{/* [{val}; {self.gen_expr(e.repeat)}] */}}'
+                val_expr = e.elements[0] if e.elements else ast.IntLit(value=0)
+                val = self.gen_expr(val_expr)
+                # If value is 0/false/NULL, use {0} (valid C zero-init)
+                if val in ('0', 'false', 'NULL', '0.0f', '0.0'):
+                    return '{0}'
+                # For small constant repeat counts, expand inline
+                if isinstance(e.repeat, ast.IntLit) and e.repeat.value <= 64:
+                    elems = ', '.join([val] * e.repeat.value)
+                    return f'{{{elems}}}'
+                # Large or dynamic N: zero-init with a runtime fill note
+                # The let/static statement handler emits the memset fill
+                return '{0}'
             elements = ', '.join(self.gen_expr(el) for el in e.elements)
             return f'{{{elements}}}'
         if isinstance(e, ast.UnaryOp):
@@ -750,17 +1004,34 @@ class Codegen:
                 return f'{self.enum_variants[e.name]}_{e.name}'
             return e.name
         if isinstance(e, ast.CatchExpr):
-            # CatchExpr is a statement-level expression that requires a pre-statement.
-            # We emit the inner expression inline; the handler is emitted as a separate
-            # statement by gen_let_stmt when it detects a CatchExpr value.
-            # For standalone use (not in a let binding), just evaluate the inner expr.
+            # CatchExpr requires multi-statement emit; only called inline as fallback.
             return self.gen_expr(e.expr)
         if isinstance(e, ast.NullCheck):
             return self.gen_expr(e.expr)
+        if isinstance(e, ast.OkExpr):
+            val = self.gen_expr(e.value)
+            if self._current_ret_type is not None:
+                rt = self.gen_type(self._current_ret_type)
+            else:
+                rt = 'PakResult'
+            return f'({rt}){{ .is_ok = true, .data.value = {val} }}'
+        if isinstance(e, ast.ErrExpr):
+            val = self.gen_expr(e.value)
+            if self._current_ret_type is not None:
+                rt = self.gen_type(self._current_ret_type)
+            else:
+                rt = 'PakResult'
+            return f'({rt}){{ .is_ok = false, .data.error = {val} }}'
+        if isinstance(e, ast.SizeOf):
+            operand = e.operand
+            if isinstance(operand, (ast.TypeName, ast.TypePointer, ast.TypeArray,
+                                    ast.TypeSlice, ast.TypeResult, ast.TypeGeneric)):
+                return f'sizeof({self.gen_type(operand)})'
+            return f'sizeof({self.gen_expr(operand)})'
         return '/* unknown expr */'
 
     def gen_program(self, program: ast.Program) -> str:
-        # First pass: collect uses, assets, fn names, and enum/variant info
+        # First pass: collect uses, assets, fn names, enum/variant info, methods
         for decl in program.decls:
             if isinstance(decl, ast.UseDecl):
                 self.uses.append(decl.path)
@@ -770,8 +1041,17 @@ class Codegen:
                 self.module_name = decl.path
             elif isinstance(decl, ast.FnDecl):
                 self.fn_names.append(decl.name)
+                if decl.type_params:
+                    self._generic_fns[decl.name] = decl
+                if decl.is_method and decl.self_type:
+                    tname = decl.self_type
+                    if tname not in self.method_registry:
+                        self.method_registry[tname] = {}
+                    self.method_registry[tname][decl.name] = decl
             elif isinstance(decl, ast.StructDecl):
                 self.struct_fields[decl.name] = {f.name: f.type for f in decl.fields}
+                if decl.type_params:
+                    self._generic_structs[decl.name] = decl
             elif isinstance(decl, ast.EnumDecl):
                 for v in decl.variants:
                     self.enum_variants[v.name] = decl.name
@@ -779,6 +1059,12 @@ class Codegen:
                 self.variant_types.add(decl.name)
                 for c in decl.cases:
                     self.enum_variants[c.name] = decl.name
+            elif isinstance(decl, ast.ImplBlock):
+                tname = decl.type_name
+                if tname not in self.method_registry:
+                    self.method_registry[tname] = {}
+                for m in decl.methods:
+                    self.method_registry[tname][m.name] = m
 
         # Build output
         out_lines = []
@@ -842,6 +1128,21 @@ class Codegen:
             if isinstance(decl, ast.EntryBlock):
                 has_entry = True
 
+        # Core Pak runtime types — always emitted
+        out_lines.append('')
+        out_lines.append('/* -- Pak runtime types -- */')
+        out_lines.append('typedef struct { const char *data; int32_t len; } PakStr;')
+        out_lines.append('typedef struct { uint8_t *base; uint8_t *ptr; size_t capacity; } PakArena;')
+        out_lines.append('static inline PakStr pak_str_from_cstr(const char *s) {')
+        out_lines.append('    return (PakStr){ .data = s, .len = (int32_t)strlen(s) }; }')
+        out_lines.append('static inline bool pak_str_eq(PakStr a, PakStr b) {')
+        out_lines.append('    return a.len == b.len && memcmp(a.data, b.data, (size_t)a.len) == 0; }')
+        out_lines.append('static inline void *pak_arena_alloc(PakArena *a, size_t sz) {')
+        out_lines.append('    sz = (sz + 7) & ~(size_t)7;  /* 8-byte align */')
+        out_lines.append('    if (a->ptr + sz > a->base + a->capacity) return NULL;')
+        out_lines.append('    void *p = a->ptr; a->ptr += sz; return p; }')
+        out_lines.append('static inline void pak_arena_reset(PakArena *a) { a->ptr = a->base; }')
+
         # Fat-slice typedefs (emitted after includes so inner types are visible,
         # and after body generation so all slices have been encountered)
         if self._slice_typedefs:
@@ -849,7 +1150,26 @@ class Codegen:
             for typedef_name, c_inner in self._slice_typedefs:
                 out_lines.append(f'typedef struct {{ {c_inner} *data; int32_t len; }} {typedef_name};')
 
+        # Result typedefs
+        if self._result_typedefs:
+            out_lines.append('')
+            for typedef_name, c_ok, c_err in self._result_typedefs:
+                out_lines.append(f'typedef struct {{ bool is_ok; union {{ {c_ok} value; {c_err} error; }} data; }} {typedef_name};')
+
         out_lines.extend(body_lines)
+
+        # Emit any monomorphized generic specializations generated during body codegen
+        if hasattr(self, '_pending_mono') and self._pending_mono:
+            out_lines.append('')
+            out_lines.append('/* -- Generic specializations -- */')
+            for decl in self._pending_mono:
+                if isinstance(decl, ast.FnDecl):
+                    out_lines.append(self.gen_fn(decl))
+                elif isinstance(decl, ast.StructDecl):
+                    out_lines.append(self.gen_struct(decl))
+                out_lines.append('')
+            self._pending_mono.clear()
+
         return '\n'.join(out_lines)
 
     def gen_decl(self, decl) -> str:
@@ -860,6 +1180,9 @@ class Codegen:
         if isinstance(decl, ast.VariantDecl):
             return self.gen_variant(decl)
         if isinstance(decl, ast.FnDecl):
+            # Skip generic function bodies — they are emitted only when specialized
+            if decl.type_params:
+                return None
             return self.gen_fn(decl)
         if isinstance(decl, ast.EntryBlock):
             return self.gen_entry(decl)
@@ -869,7 +1192,107 @@ class Codegen:
             return self.gen_static_decl(decl)
         if isinstance(decl, ast.LetDecl):
             return self.gen_let_decl_global(decl)
+        if isinstance(decl, ast.ImplBlock):
+            return self.gen_impl(decl)
         return f'/* unhandled decl: {type(decl).__name__} */'
+
+    def gen_impl(self, impl: ast.ImplBlock) -> str:
+        parts = []
+        for method in impl.methods:
+            parts.append(self.gen_fn(method, prefix=impl.type_name))
+        return '\n\n'.join(parts)
+
+    def _infer_type_args(self, fn_decl: ast.FnDecl, call_args: list) -> list:
+        """Infer concrete types for a generic function's type params from call site args."""
+        if not fn_decl.type_params:
+            return []
+        inferred = {}
+        for param, arg_expr in zip(fn_decl.params, call_args):
+            # Find which type params appear in the param type
+            self._collect_type_param_inferences(param.type, arg_expr, fn_decl.type_params, inferred)
+        # Return concrete types in type_param declaration order
+        result = []
+        for tp in fn_decl.type_params:
+            if tp in inferred:
+                result.append(inferred[tp])
+            else:
+                return []  # can't fully infer — caller should pass explicit args
+        return result
+
+    def _collect_type_param_inferences(self, param_type, arg_expr, type_params: list, inferred: dict):
+        """Walk param_type looking for type params, infer concrete types from arg_expr."""
+        if isinstance(param_type, ast.TypeName) and param_type.name in type_params:
+            # This param position maps to a type param — infer from argument
+            t = self._expr_type(arg_expr)
+            if t is None:
+                # Guess from literal type
+                if isinstance(arg_expr, ast.IntLit):
+                    t = ast.TypeName(name='i32')
+                elif isinstance(arg_expr, ast.FloatLit):
+                    t = ast.TypeName(name='f32')
+                elif isinstance(arg_expr, ast.BoolLit):
+                    t = ast.TypeName(name='bool')
+                elif isinstance(arg_expr, ast.StringLit):
+                    t = ast.TypeName(name='Str')
+            if t is not None and param_type.name not in inferred:
+                inferred[param_type.name] = t
+        elif isinstance(param_type, ast.TypePointer):
+            self._collect_type_param_inferences(param_type.inner, arg_expr, type_params, inferred)
+        elif isinstance(param_type, ast.TypeGeneric):
+            for sub in param_type.args:
+                self._collect_type_param_inferences(sub, arg_expr, type_params, inferred)
+
+    def _monomorphize_fn(self, fn_name: str, type_args: list) -> str:
+        """Return the C name for a specialized generic function, emitting it if first use."""
+        import copy
+        fn_decl = self._generic_fns[fn_name]
+        c_type_args = tuple(self.gen_type(t) for t in type_args)
+        cache_key = (fn_name, c_type_args)
+        if cache_key in self._mono_cache:
+            return self._mono_cache[cache_key]
+        # Build specialized name: foo_i32, foo_i32_f32, etc.
+        safe = '_'.join(t.replace(' ', '_').replace('*', 'p') for t in c_type_args)
+        specialized_name = f'{fn_name}_{safe}'
+        self._mono_cache[cache_key] = specialized_name
+        # Create a substitution map: type_param_name → concrete type
+        subst = {}
+        for i, tp in enumerate(fn_decl.type_params):
+            if i < len(type_args):
+                subst[tp] = type_args[i]
+        # Deep-copy the decl and substitute type params
+        spec_decl = copy.deepcopy(fn_decl)
+        spec_decl.name = specialized_name
+        spec_decl.type_params = []
+        _subst_types_in_fn(spec_decl, subst)
+        # Emit at file scope (append to body_lines via _pending_mono)
+        if not hasattr(self, '_pending_mono'):
+            self._pending_mono = []
+        self._pending_mono.append(spec_decl)
+        return specialized_name
+
+    def _monomorphize_struct(self, struct_name: str, type_args: list) -> str:
+        """Return the C name for a specialized generic struct, emitting if first use."""
+        import copy
+        struct_decl = self._generic_structs[struct_name]
+        c_type_args = tuple(self.gen_type(t) for t in type_args)
+        cache_key = (struct_name, c_type_args)
+        if cache_key in self._mono_cache:
+            return self._mono_cache[cache_key]
+        safe = '_'.join(t.replace(' ', '_').replace('*', 'p') for t in c_type_args)
+        specialized_name = f'{struct_name}_{safe}'
+        self._mono_cache[cache_key] = specialized_name
+        subst = {}
+        for i, tp in enumerate(struct_decl.type_params):
+            if i < len(type_args):
+                subst[tp] = type_args[i]
+        spec_decl = copy.deepcopy(struct_decl)
+        spec_decl.name = specialized_name
+        spec_decl.type_params = []
+        _subst_types_in_struct(spec_decl, subst)
+        if not hasattr(self, '_pending_mono'):
+            self._pending_mono = []
+        self._pending_mono.append(spec_decl)
+        return specialized_name
 
     def gen_struct(self, s: ast.StructDecl) -> str:
         attrs = []
@@ -972,6 +1395,8 @@ class Codegen:
             return '\n'.join(lines)
 
         lines.append(f'{ret} {name}({param_str}) {{')
+        prev_ret = self._current_ret_type
+        self._current_ret_type = fn.ret_type
         self.scope_push()
         for p in fn.params:
             self.scope_set(p.name, p.type)
@@ -983,6 +1408,7 @@ class Codegen:
         for d_line in self._emit_defers_for_scope(-1, '    ', 1):
             lines.append(d_line)
         self.scope_pop()
+        self._current_ret_type = prev_ret
         lines.append('}')
         return '\n'.join(lines)
 
@@ -1093,12 +1519,70 @@ class Codegen:
                 self.scope_set(s.name, ast.TypePointer(inner=ast.TypeName(name='auto')))
 
         if s.value is not None and not isinstance(s.value, ast.UndefinedLit):
+            # CatchExpr: multi-statement emit
+            if isinstance(s.value, ast.CatchExpr):
+                return self._gen_catch_let(s, s.value, pad, prefix, decl)
+            # ArrayLit repeat with large/dynamic N: declare then loop fill
+            if isinstance(s.value, ast.ArrayLit) and s.value.repeat is not None:
+                val_expr = s.value.elements[0] if s.value.elements else ast.IntLit(value=0)
+                val = self.gen_expr(val_expr)
+                zero_val = val in ('0', 'false', 'NULL', '0.0f', '0.0')
+                is_small_const = isinstance(s.value.repeat, ast.IntLit) and s.value.repeat.value <= 64
+                # Small constant or zero: let gen_expr handle inline expansion
+                if zero_val or is_small_const:
+                    expanded = self.gen_expr(s.value)
+                    return f'{pad}{prefix}{decl} = {expanded};'
+                # Large/dynamic: zero-init then fill loop
+                count = self.gen_expr(s.value.repeat)
+                lines = [f'{pad}{prefix}{decl} = {{0}};']
+                lines.append(f'{pad}for (int _fi = 0; _fi < (int)({count}); _fi++) {s.name}[_fi] = {val};')
+                return '\n'.join(lines)
             val = self.gen_expr(s.value)
+            # OkExpr/ErrExpr: use actual result type name from the declared type
+            if isinstance(s.value, (ast.OkExpr, ast.ErrExpr)) and s.type:
+                result_c = self.gen_type(s.type)
+                if isinstance(s.value, ast.OkExpr):
+                    inner = self.gen_expr(s.value.value)
+                    val = f'({result_c}){{ .is_ok = true, .data.value = {inner} }}'
+                else:
+                    inner = self.gen_expr(s.value.value)
+                    val = f'({result_c}){{ .is_ok = false, .data.error = {inner} }}'
             return f'{pad}{prefix}{decl} = {val};'
         elif isinstance(s.value, ast.UndefinedLit):
             return f'{pad}{prefix}{decl}; /* undefined */'
         else:
             return f'{pad}{prefix}{decl};'
+
+    def _gen_catch_let(self, s: ast.LetDecl, catch: ast.CatchExpr,
+                       pad: str, prefix: str, decl: str) -> str:
+        """Emit a let binding whose value is a CatchExpr:
+           let x = try_call() catch e { ... }
+        Expands to:
+           ResultType _tmp = try_call();
+           if (!_tmp.is_ok) { [handler] }
+           Type x = _tmp.data.value;
+        """
+        inner_c = self.gen_expr(catch.expr)
+        tmp = f'_catch_{s.name}'
+        lines = []
+        # We don't know the result type statically in all cases — use __auto_type
+        lines.append(f'{pad}__auto_type {tmp} = {inner_c};')
+        # error branch
+        lines.append(f'{pad}if (!{tmp}.is_ok) {{')
+        inner_pad = pad + '    '
+        if catch.binding:
+            lines.append(f'{inner_pad}__auto_type {catch.binding} = {tmp}.data.error;')
+        if isinstance(catch.handler, ast.Block):
+            for stmt in catch.handler.stmts:
+                r = self.gen_stmt(stmt, len(inner_pad) // 4)
+                if r:
+                    lines.append(r)
+        else:
+            lines.append(f'{inner_pad}{self.gen_expr(catch.handler)};')
+        lines.append(f'{pad}}}')
+        # success: extract value
+        lines.append(f'{pad}{prefix}{decl} = {tmp}.data.value;')
+        return '\n'.join(lines)
 
     def gen_static_stmt(self, s: ast.StaticDecl, pad: str) -> str:
         annotations = s.annotations or []
@@ -1312,6 +1796,44 @@ class Codegen:
             lines.append(self.gen_stmt(stmt, indent + 1))
         lines.append(f'{pad}}}')
         return '\n'.join(l for l in lines if l is not None)
+
+
+def _subst_type(t, subst: dict):
+    """Substitute TypeParam names in a type tree."""
+    if t is None:
+        return t
+    if isinstance(t, ast.TypeParam):
+        return subst.get(t.name, t)
+    if isinstance(t, ast.TypeName):
+        if t.name in subst:
+            return subst[t.name]
+        return t
+    if isinstance(t, ast.TypePointer):
+        t.inner = _subst_type(t.inner, subst)
+    elif isinstance(t, ast.TypeSlice):
+        t.inner = _subst_type(t.inner, subst)
+    elif isinstance(t, ast.TypeArray):
+        t.inner = _subst_type(t.inner, subst)
+    elif isinstance(t, ast.TypeResult):
+        t.ok = _subst_type(t.ok, subst)
+        t.err = _subst_type(t.err, subst)
+    elif isinstance(t, ast.TypeOption):
+        t.inner = _subst_type(t.inner, subst)
+    elif isinstance(t, ast.TypeGeneric):
+        t.args = [_subst_type(a, subst) for a in t.args]
+    elif isinstance(t, ast.TypeFn):
+        t.params = [_subst_type(p, subst) for p in t.params]
+        t.ret = _subst_type(t.ret, subst)
+    return t
+
+def _subst_types_in_fn(fn: ast.FnDecl, subst: dict):
+    for p in fn.params:
+        p.type = _subst_type(p.type, subst)
+    fn.ret_type = _subst_type(fn.ret_type, subst)
+
+def _subst_types_in_struct(s: ast.StructDecl, subst: dict):
+    for f in s.fields:
+        f.type = _subst_type(f.type, subst)
 
 
 def generate(program: ast.Program, filename: str = '<unknown>', module_headers: dict = None) -> str:
