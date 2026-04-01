@@ -873,6 +873,21 @@ class Parser:
         if self.check(TT.DOT):
             self.advance()
             name = self.expect(TT.IDENT).value
+            # .CaseName(binding, ...) — variant destructuring
+            if self.check(TT.LPAREN):
+                self.advance()
+                args = []
+                while not self.check(TT.RPAREN):
+                    if self.check(TT.IDENT):
+                        args.append(ast.Ident(name=self.advance().value, line=line, col=col))
+                    elif self.check(TT.UNDERSCORE):
+                        self.advance()
+                        args.append(ast.Ident(name='_', line=line, col=col))
+                    if self.check(TT.COMMA):
+                        self.advance()
+                self.expect(TT.RPAREN)
+                return ast.Call(func=ast.EnumVariantAccess(name=name, line=line, col=col),
+                                args=args, line=line, col=col)
             return ast.EnumVariantAccess(name=name, line=line, col=col)
         elif self.check(TT.UNDERSCORE):
             self.advance()

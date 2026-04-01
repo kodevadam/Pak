@@ -239,7 +239,12 @@ class MipsTypeEnv:
             case_size  = 0
             case_align = 1
             for sf in case.fields:
-                fl = self.layout_of_type(sf.type)
+                # fields may be StructField objects or (name, type) tuples
+                if isinstance(sf, tuple):
+                    ftype = sf[1]
+                else:
+                    ftype = sf.type
+                fl = self.layout_of_type(ftype)
                 case_align = max(case_align, fl.align)
                 # Align within case
                 case_size  = (case_size + fl.align - 1) & ~(fl.align - 1)
@@ -371,9 +376,14 @@ class MipsTypeEnv:
                 fields = []
                 offset = 0
                 for sf in case.fields:
-                    fl = self.layout_of_type(sf.type)
+                    # fields may be StructField objects or (name, type) tuples
+                    if isinstance(sf, tuple):
+                        fname, ftype = sf
+                    else:
+                        fname, ftype = sf.name, sf.type
+                    fl = self.layout_of_type(ftype)
                     offset = (offset + fl.align - 1) & ~(fl.align - 1)
-                    fields.append(FieldInfo(sf.name, offset, fl.size, fl.align, sf.type))
+                    fields.append(FieldInfo(fname, offset, fl.size, fl.align, ftype))
                     offset += fl.size
                 return fields
         return []

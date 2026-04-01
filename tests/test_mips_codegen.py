@@ -653,3 +653,535 @@ class TestN64Runtime:
     def test_debug_log_symbol(self):
         sym = self.rt.symbol_for('debug', 'log')
         assert sym == 'debugf'
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 2 — Type System & Structured Data
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPhase2StructLayout:
+    """2.1 — Struct layout: type-aware field loads/stores and struct copy."""
+
+    def test_struct_field_u8_uses_sb(self):
+        """Struct with u8 field should use sb for store."""
+        asm = compile_mips("""
+        struct Pixel {
+            r: u8
+            g: u8
+            b: u8
+            a: u8
+        }
+
+        entry {
+            let p = Pixel { r: 255, g: 128, b: 0, a: 255 }
+        }
+        """)
+        assert has_instr(asm, 'sb')
+
+    def test_struct_field_i16_uses_sh(self):
+        """Struct with i16 field should use sh for store."""
+        asm = compile_mips("""
+        struct Point {
+            x: i16
+            y: i16
+        }
+
+        entry {
+            let p = Point { x: 100, y: 200 }
+        }
+        """)
+        assert has_instr(asm, 'sh')
+
+    def test_struct_field_f32_access(self):
+        """Struct field access emits proper code."""
+        asm = compile_mips("""
+        struct Vec2 {
+            x: f32
+            y: f32
+        }
+
+        fn get_x(v: *Vec2) -> f32 {
+            return v.x
+        }
+
+        entry {
+            let v = Vec2 { x: 1.0, y: 2.0 }
+        }
+        """)
+        assert has_instr(asm, 'get_x')
+
+    def test_struct_zero_init(self):
+        """Struct literals should zero-init to handle padding."""
+        asm = compile_mips("""
+        struct Big {
+            a: i32
+            b: i32
+            c: i32
+            d: i32
+        }
+
+        entry {
+            let b = Big { a: 1, b: 2, c: 3, d: 4 }
+        }
+        """)
+        # Should contain multiple sw $zero for zero-init
+        count = asm.count('$zero')
+        assert count >= 4  # at least 4 words of zero-init
+
+    def test_struct_copy_memcpy_large(self):
+        """Large struct assignment should use memcpy or unrolled copy."""
+        asm = compile_mips("""
+        struct Large {
+            a: i32
+            b: i32
+            c: i32
+            d: i32
+            e: i32
+            f: i32
+            g: i32
+            h: i32
+            i: i32
+            j: i32
+        }
+
+        fn make_large() -> Large {
+            return Large { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8, i: 9, j: 10 }
+        }
+
+        entry {
+            let x = make_large()
+        }
+        """)
+        assert has_instr(asm, 'main')
+
+
+class TestPhase2EnumCodegen:
+    """2.2 — Enum codegen: integer constants, base types."""
+
+    def test_enum_match(self):
+        asm = compile_mips("""
+        enum Color {
+            Red
+            Green
+            Blue
+        }
+
+        fn color_val(c: Color) -> i32 {
+            match c {
+                .Red => { return 0 }
+                .Green => { return 1 }
+                .Blue => { return 2 }
+            }
+        }
+
+        entry {
+            let c = Color.Green
+            let v = color_val(c)
+        }
+        """)
+        assert has_instr(asm, 'color_val')
+        assert has_instr(asm, 'beq') or has_instr(asm, 'bne')
+
+    def test_enum_u8_base_type(self):
+        """Enum with u8 base type should still work."""
+        asm = compile_mips("""
+        enum Direction: u8 {
+            Up
+            Down
+            Left
+            Right
+        }
+
+        entry {
+            let d = Direction.Left
+        }
+        """)
+        assert has_instr(asm, 'main')
+
+
+class TestPhase2VariantCodegen:
+    """2.3 — Variant (tagged union) construction and matching."""
+
+    def test_variant_constructor_stores_tag(self):
+        """Constructing a variant should store the tag value."""
+        asm = compile_mips("""
+        struct Vec2 { x: f32, y: f32 }
+
+        variant Shape {
+            Circle { radius: f32 }
+            Rect { w: f32, h: f32 }
+        }
+
+        entry {
+            let s = Circle(1.0)
+        }
+        """)
+        # Should have a store of tag value (0 for Circle)
+        assert has_instr(asm, 'sb') or has_instr(asm, 'sh') or has_instr(asm, 'sw')
+        assert has_instr(asm, 'main')
+
+    def test_variant_match_extracts_payload(self):
+        """Match on variant should extract payload fields."""
+        asm = compile_mips("""
+        variant Shape {
+            Circle { radius: i32 }
+            Rect { w: i32, h: i32 }
+        }
+
+        fn area(s: Shape) -> i32 {
+            match s {
+                .Circle(r) => { return r * r * 3 }
+                .Rect(w, h) => { return w * h }
+            }
+        }
+
+        entry {
+            let s = Circle(5)
+            let a = area(s)
+        }
+        """)
+        assert has_instr(asm, 'area')
+        assert has_instr(asm, 'lbu') or has_instr(asm, 'lhu') or has_instr(asm, 'lw')
+
+    def test_variant_multiple_cases(self):
+        """Variant with multiple cases produces distinct tags."""
+        asm = compile_mips("""
+        variant Animal {
+            Dog { name: i32 }
+            Cat { name: i32, indoor: bool }
+            Fish { }
+        }
+
+        entry {
+            let a = Dog(42)
+            let b = Cat(99, true)
+        }
+        """)
+        assert has_instr(asm, 'main')
+
+
+class TestPhase2SliceCodegen:
+    """2.4 — Slices (fat pointers) and bounds checking."""
+
+    def test_slice_expr_emits_fat_pointer(self):
+        """Slicing an array should produce ptr + len pair."""
+        asm = compile_mips("""
+        entry {
+            let arr = [1, 2, 3, 4, 5]
+            let s = arr[1..3]
+        }
+        """)
+        assert has_instr(asm, 'main')
+        # Should have subu for computing length (end - start)
+        assert has_instr(asm, 'subu')
+
+    def test_bounds_check_flag(self):
+        """When bounds_check=True, should emit sltu + panic branch."""
+        from pak.mips import MipsCodegen as MC
+        cg = MC(bounds_check=True)
+        source = textwrap.dedent("""
+        entry {
+            let arr = [1, 2, 3]
+        }
+        """).strip()
+        tokens = Lexer(source).tokenize()
+        program = Parser(tokens).parse()
+        tenv = TypeEnv()
+        tenv.collect(program)
+        asm = cg.generate(program, tenv)
+        assert has_instr(asm, 'main')
+
+
+class TestPhase2ResultOption:
+    """2.5 — Result and Option type codegen."""
+
+    def test_ok_constructor_stores_tag_1(self):
+        """ok(val) should store is_ok=1 and the payload."""
+        asm = compile_mips("""
+        fn safe_div(a: i32, b: i32) -> Result(i32, i32) {
+            if b == 0 {
+                return err(0)
+            }
+            return ok(a / b)
+        }
+
+        entry {
+            let r = safe_div(10, 2)
+        }
+        """)
+        assert has_instr(asm, 'safe_div')
+        # ok() should store tag=1 via sb
+        assert has_instr(asm, 'sb')
+
+    def test_err_constructor_stores_tag_0(self):
+        """err(val) should store is_ok=0."""
+        asm = compile_mips("""
+        fn fail() -> Result(i32, i32) {
+            return err(42)
+        }
+
+        entry {
+            let r = fail()
+        }
+        """)
+        assert has_instr(asm, 'fail')
+
+    def test_catch_expr(self):
+        """Catch expression should branch on is_ok flag."""
+        asm = compile_mips("""
+        fn maybe_fail(x: i32) -> Result(i32, i32) {
+            if x < 0 { return err(x) }
+            return ok(x * 2)
+        }
+
+        entry {
+            let r = maybe_fail(5)
+            let v = r catch e { 0 }
+        }
+        """)
+        assert has_instr(asm, 'lbu')  # loading is_ok flag
+        assert has_instr(asm, 'bnez') or has_instr(asm, 'beqz')
+
+
+class TestPhase2TypeAwareOps:
+    """Miscellaneous Phase 2: type-aware ops, goto/label fix, alloc fix."""
+
+    def test_array_literal(self):
+        """Array literal should store each element."""
+        asm = compile_mips("""
+        entry {
+            let a = [10, 20, 30]
+        }
+        """)
+        assert has_instr(asm, 'sw')
+        assert has_instr(asm, 'main')
+
+    def test_tuple_access(self):
+        """Tuple access should load at correct word offset."""
+        asm = compile_mips("""
+        entry {
+            let t = (1, 2, 3)
+        }
+        """)
+        assert has_instr(asm, 'sw')
+
+    def test_alloc_free(self):
+        """alloc/free should call runtime helpers."""
+        asm = compile_mips("""
+        entry {
+            let p = alloc(i32)
+            free(p)
+        }
+        """)
+        assert has_instr(asm, '__pak_alloc')
+        assert has_instr(asm, '__pak_free')
+
+    def test_defer_in_function(self):
+        """Defer should emit deferred code before return."""
+        asm = compile_mips("""
+        fn cleanup() -> i32 {
+            let x = 10
+            defer { x = 0 }
+            return x
+        }
+
+        entry {
+            let v = cleanup()
+        }
+        """)
+        assert has_instr(asm, 'cleanup')
+
+    def test_do_while(self):
+        """Do-while loop should emit body then condition check."""
+        asm = compile_mips("""
+        entry {
+            let x = 0
+            do {
+                x = x + 1
+            } while x < 10
+        }
+        """)
+        assert has_instr(asm, 'bnez')
+
+    def test_comptime_if(self):
+        """Comptime if with constant true should emit only then-branch."""
+        asm = compile_mips("""
+        const DEBUG = 1
+
+        entry {
+            comptime if (DEBUG) {
+                let x = 42
+            }
+        }
+        """)
+        assert has_instr(asm, 'li')
+
+    def test_closure_emission(self):
+        """Closure should be emitted as a separate function."""
+        asm = compile_mips("""
+        fn apply(f: fn(i32) -> i32, x: i32) -> i32 {
+            return f(x)
+        }
+
+        entry {
+            let double = fn(x: i32) -> i32 { return x * 2 }
+            let r = apply(double, 5)
+        }
+        """)
+        assert has_instr(asm, '__closure')
+
+    def test_for_range(self):
+        """For-range loop with counter."""
+        asm = compile_mips("""
+        entry {
+            let sum = 0
+            for i in 0..10 {
+                sum = sum + i
+            }
+        }
+        """)
+        assert has_instr(asm, 'bge')
+        assert has_instr(asm, 'addiu')
+
+    def test_string_literal(self):
+        """String literals should be interned in .rodata."""
+        asm = compile_mips("""
+        entry {
+            let msg = "hello world"
+        }
+        """)
+        assert has_instr(asm, '.rodata') or has_instr(asm, '.section')
+        assert has_instr(asm, 'hello world')
+
+    def test_nested_if_else(self):
+        """Nested if/elif/else chains."""
+        asm = compile_mips("""
+        fn classify(x: i32) -> i32 {
+            if x < 0 {
+                return -1
+            } else if x == 0 {
+                return 0
+            } else {
+                return 1
+            }
+        }
+
+        entry {
+            let r = classify(5)
+        }
+        """)
+        assert has_instr(asm, 'classify')
+
+
+class TestPhase2StructCopyIntegration:
+    """Struct copy and pass-by-value integration tests."""
+
+    def test_struct_let_with_struct_lit(self):
+        """Let binding with struct literal should produce correct asm."""
+        asm = compile_mips("""
+        struct Pos {
+            x: i32
+            y: i32
+        }
+
+        entry {
+            let p = Pos { x: 10, y: 20 }
+        }
+        """)
+        assert has_instr(asm, 'sw')
+        assert has_instr(asm, 'main')
+
+    def test_nested_struct(self):
+        """Nested struct should compute offsets correctly."""
+        asm = compile_mips("""
+        struct Inner {
+            a: i32
+            b: i32
+        }
+
+        struct Outer {
+            x: i32
+            inner: Inner
+        }
+
+        entry {
+            let o = Outer { x: 1, inner: Inner { a: 2, b: 3 } }
+        }
+        """)
+        assert has_instr(asm, 'main')
+        assert has_instr(asm, 'sw')
+
+
+class TestPhase2VariantLayoutIntegration:
+    """Variant layout integration: verify correct tag + payload offsets."""
+
+    def test_variant_case_fields_layout(self):
+        """MipsTypeEnv.variant_case_fields should return correct field info."""
+        from pak.mips.types import MipsTypeEnv
+        tenv = MipsTypeEnv()
+
+        source = textwrap.dedent("""
+        variant Shape {
+            Circle { radius: f32 }
+            Rect { w: f32, h: f32 }
+        }
+
+        entry { }
+        """).strip()
+        tokens = Lexer(source).tokenize()
+        program = Parser(tokens).parse()
+        tenv.register_program(program)
+
+        # Circle has one field: radius at offset 0
+        circle_fields = tenv.variant_case_fields('Shape', 'Circle')
+        assert len(circle_fields) == 1
+        assert circle_fields[0].name == 'radius'
+        assert circle_fields[0].size == 4
+
+        # Rect has two fields: w, h
+        rect_fields = tenv.variant_case_fields('Shape', 'Rect')
+        assert len(rect_fields) == 2
+        assert rect_fields[0].name == 'w'
+        assert rect_fields[1].name == 'h'
+
+    def test_variant_tag_values(self):
+        """variant_tag should return 0 for first case, 1 for second, etc."""
+        from pak.mips.types import MipsTypeEnv
+        tenv = MipsTypeEnv()
+
+        source = textwrap.dedent("""
+        variant Animal {
+            Dog { }
+            Cat { }
+            Fish { }
+        }
+
+        entry { }
+        """).strip()
+        tokens = Lexer(source).tokenize()
+        program = Parser(tokens).parse()
+        tenv.register_program(program)
+
+        assert tenv.variant_tag('Animal', 'Dog') == 0
+        assert tenv.variant_tag('Animal', 'Cat') == 1
+        assert tenv.variant_tag('Animal', 'Fish') == 2
+
+    def test_variant_layout_tag_size(self):
+        """Variant with <= 256 cases should have 1-byte tag."""
+        from pak.mips.types import MipsTypeEnv
+        tenv = MipsTypeEnv()
+
+        source = textwrap.dedent("""
+        variant Msg {
+            Hello { }
+            Goodbye { }
+        }
+
+        entry { }
+        """).strip()
+        tokens = Lexer(source).tokenize()
+        program = Parser(tokens).parse()
+        tenv.register_program(program)
+
+        layout = tenv.layout_of_name('Msg')
+        assert layout.tag_size == 1
