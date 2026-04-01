@@ -408,8 +408,9 @@ class Parser:
             self.advance()
             if self.check(TT.RBRACKET):
                 self.advance()
+                mut = bool(self.match(TT.MUT))
                 inner = self.parse_type()
-                return ast.TypeSlice(inner=inner, line=line, col=col)
+                return ast.TypeSlice(inner=inner, mutable=mut, line=line, col=col)
             # Peek ahead: if this is [T; N] (Rust style) the first expr will be a
             # type name followed by SEMICOLON.  We do a speculative type parse.
             save_pos = self.pos
@@ -926,6 +927,10 @@ class Parser:
         expr = self.parse_primary()
         while True:
             if self.check(TT.DOT):
+                # Don't consume `.IDENT` if it looks like the next match arm pattern
+                # e.g.  => return 1   \n  .down => ...   — the `.down` is a pattern not a field
+                if self.peek(1).type == TT.IDENT and self.peek(2).type == TT.FAT_ARROW:
+                    break
                 self.advance()
                 field = self.expect(TT.IDENT).value
                 expr = ast.DotAccess(obj=expr, field=field, line=line, col=col)

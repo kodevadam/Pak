@@ -38,6 +38,7 @@ class TypePointer:
 @dataclass
 class TypeSlice:
     inner: Any
+    mutable: bool = False
     line: int = 0
     col: int = 0
 

@@ -516,6 +516,26 @@ def _fixpoint_shift(typ) -> int:
     return 0
 
 
+def _strip_parens(s: str) -> str:
+    """Remove one layer of matching outer parentheses, if present.
+
+    Used to avoid double-wrapping in if/while conditions:
+    gen_expr for BinOp already returns '(a == b)'; the caller adds
+    its own 'if (%s)' wrapper, which would produce 'if ((a == b))'.
+    """
+    if len(s) >= 2 and s[0] == '(' and s[-1] == ')':
+        depth = 0
+        for i, ch in enumerate(s):
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+            if depth == 0 and i < len(s) - 1:
+                return s   # outer parens close before the end — don't strip
+        return s[1:-1]
+    return s
+
+
 # ── Type mappings ─────────────────────────────────────────────────────────────
 
 PRIMITIVE_TYPES = {
@@ -2175,7 +2195,7 @@ class Codegen:
         return f'{pad}{prefix}{decl};'
 
     def gen_if(self, s: ast.IfStmt, pad: str, indent: int) -> str:
-        cond = self.gen_expr(s.condition)
+        cond = _strip_parens(self.gen_expr(s.condition))
         lines = [f'{pad}if ({cond}) {{']
         self.scope_push()
         for stmt in s.then.stmts:
@@ -2185,7 +2205,7 @@ class Codegen:
         self.scope_pop()
         lines.append(f'{pad}}}')
         for ec, eb in s.elif_branches:
-            lines.append(f'{pad}else if ({self.gen_expr(ec)}) {{')
+            lines.append(f'{pad}else if ({_strip_parens(self.gen_expr(ec))}) {{')
             self.scope_push()
             for stmt in eb.stmts:
                 lines.append(self.gen_stmt(stmt, indent + 1))
@@ -2240,7 +2260,7 @@ class Codegen:
         return '\n'.join(l for l in lines if l is not None)
 
     def gen_while(self, s: ast.WhileStmt, pad: str, indent: int) -> str:
-        cond = self.gen_expr(s.condition)
+        cond = _strip_parens(self.gen_expr(s.condition))
         lines = [f'{pad}while ({cond}) {{']
         self.scope_push()
         for stmt in s.body.stmts:
