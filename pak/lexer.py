@@ -303,14 +303,19 @@ class Lexer:
                 while self.pos < len(self.source) and (self.peek().isalnum() or self.peek() == '_'):
                     name.append(self.advance())
                 word = ''.join(name)
-                # Check for fixed-point type like fix16.16, fix10.5, fix1.15
-                if word == 'fix' and self.pos < len(self.source) and self.peek().isdigit():
-                    rest = [word]
-                    while self.pos < len(self.source) and (self.peek().isdigit() or self.peek() == '.'):
-                        rest.append(self.advance())
-                    word = ''.join(rest)
-                    tok(TT.IDENT, word)
-                elif word in KEYWORDS:
+                # Fixed-point types: fixNN.MM (e.g. fix16.16, fix10.5, fix1.15).
+                # The digit part is consumed into `word` by the isalnum() loop,
+                # so we end up with e.g. word='fix16'. Check if followed by '.NN'.
+                if re.match(r'^fix\d+$', word):
+                    if (self.pos < len(self.source) and self.source[self.pos] == '.'
+                            and self.pos + 1 < len(self.source)
+                            and self.source[self.pos + 1].isdigit()):
+                        self.advance()  # consume '.'
+                        frac = []
+                        while self.pos < len(self.source) and self.peek().isdigit():
+                            frac.append(self.advance())
+                        word = f'{word}.{"".join(frac)}'
+                if word in KEYWORDS:
                     tok(KEYWORDS[word], word)
                 else:
                     tok(TT.IDENT, word)

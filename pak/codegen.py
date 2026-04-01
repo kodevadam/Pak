@@ -202,7 +202,10 @@ class Codegen:
         self.assets: List[ast.AssetDecl] = []
         self.module_name: str = ''
         self.fn_names: List[str] = []
-        self.enum_variants: dict = {}  # variant_case → enum_name
+        self.enum_variants: dict = {}  # case_name → enum_or_variant_type_name
+        self.variant_types: set = set()  # names of variant (tagged-union) types
+        # struct_name → {field_name: type_node} — populated in gen_program pass 1
+        self.struct_fields: dict = {}
         # Map of user module path → generated header filename (for cross-module includes)
         self.module_headers: dict = module_headers or {}
         # Scope stack: {name: type_node}
@@ -261,9 +264,25 @@ class Codegen:
         if isinstance(e, ast.Ident):
             return self.scope_get(e.name)
         if isinstance(e, ast.DotAccess) and isinstance(e.obj, ast.Ident):
-            # could look up struct field — skip for now
-            pass
+            obj_type = self.scope_get(e.obj.name)
+            # Unwrap pointer to get the struct name
+            struct_name = None
+            if isinstance(obj_type, ast.TypeName):
+                struct_name = obj_type.name
+            elif isinstance(obj_type, ast.TypePointer) and isinstance(obj_type.inner, ast.TypeName):
+                struct_name = obj_type.inner.name
+            if struct_name and struct_name in self.struct_fields:
+                return self.struct_fields[struct_name].get(e.field)
         return None
+
+    def _match_type_name(self, expr) -> str:
+        """Return the base type name of a match expression (for variant/enum detection)."""
+        t = self._expr_type(expr)
+        if isinstance(t, ast.TypeName):
+            return t.name
+        if isinstance(t, ast.TypePointer) and isinstance(t.inner, ast.TypeName):
+            return t.inner.name
+        return ''
 
     def emit(self, line: str = ''):
         if line:
@@ -444,10 +463,13 @@ class Codegen:
                 self.module_name = decl.path
             elif isinstance(decl, ast.FnDecl):
                 self.fn_names.append(decl.name)
+            elif isinstance(decl, ast.StructDecl):
+                self.struct_fields[decl.name] = {f.name: f.type for f in decl.fields}
             elif isinstance(decl, ast.EnumDecl):
                 for v in decl.variants:
                     self.enum_variants[v.name] = decl.name
             elif isinstance(decl, ast.VariantDecl):
+                self.variant_types.add(decl.name)
                 for c in decl.cases:
                     self.enum_variants[c.name] = decl.name
 
@@ -872,19 +894,29 @@ class Codegen:
         expr = self.gen_expr(s.expr)
         inner_pad = '    ' * (indent + 1)
         inner2_pad = '    ' * (indent + 2)
-        lines = [f'{pad}switch ({expr}) {{']
+
+        # Determine if the matched expression is a variant (tagged union).
+        # Variants need switch(expr.tag); enums switch(expr) directly.
+        match_type = self._match_type_name(s.expr)
+        is_variant = match_type in self.variant_types
+        switch_expr = f'{expr}.tag' if is_variant else expr
+        lines = [f'{pad}switch ({switch_expr}) {{']
 
         for arm in s.arms:
             pat = arm.pattern
             if isinstance(pat, ast.Ident) and pat.name == '_':
                 lines.append(f'{inner_pad}default:')
             elif isinstance(pat, ast.EnumVariantAccess):
-                if pat.name in self.enum_variants:
-                    lines.append(f'{inner_pad}case {self.enum_variants[pat.name]}_{pat.name}:')
+                type_name = self.enum_variants.get(pat.name, '')
+                if type_name in self.variant_types:
+                    # Tagged union: case uses _tag_ infix
+                    lines.append(f'{inner_pad}case {type_name}_tag_{pat.name}:')
+                elif type_name:
+                    lines.append(f'{inner_pad}case {type_name}_{pat.name}:')
                 else:
                     lines.append(f'{inner_pad}case {pat.name}:')
             elif isinstance(pat, ast.DotAccess):
-                # EnumName.variant
+                # EnumName.variant explicit form
                 variant = pat.field
                 obj_name = self.gen_expr(pat.obj)
                 lines.append(f'{inner_pad}case {obj_name}_{variant}:')
@@ -895,13 +927,19 @@ class Codegen:
             else:
                 lines.append(f'{inner_pad}case /* {self.gen_expr(pat)} */:')
 
-            # Body
+            # Wrap body in {} so variable declarations are always valid in C
+            lines.append(f'{inner_pad}{{')
+            self.scope_push()
             if isinstance(arm.body, ast.Block):
                 for stmt in arm.body.stmts:
                     lines.append(self.gen_stmt(stmt, indent + 2))
             else:
                 lines.append(f'{inner2_pad}{self.gen_expr(arm.body)};')
+            for d_line in self._emit_defers_for_scope(-1, inner2_pad, indent + 2):
+                lines.append(d_line)
+            self.scope_pop()
             lines.append(f'{inner2_pad}break;')
+            lines.append(f'{inner_pad}}}')
 
         lines.append(f'{pad}}}')
         return '\n'.join(l for l in lines if l is not None)

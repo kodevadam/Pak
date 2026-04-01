@@ -97,6 +97,7 @@ CFLAGS  += {opt_flag} -Wall -Wextra
 CFLAGS  += -DRESOLUTION=$(RESOLUTION) -DBIT_DEPTH=$(BIT_DEPTH)
 CFLAGS  += -DFRAMEBUFFERS=$(FRAMEBUFFERS)
 CFLAGS  += -I$(RUNTIME_DIR)
+CFLAGS  += -I$(BUILD_DIR)
 CFLAGS  += {tiny3d_include}
 
 LDFLAGS += {tiny3d_ldflags}

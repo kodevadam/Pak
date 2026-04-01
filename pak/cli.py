@@ -150,14 +150,13 @@ def cmd_build(args):
         mod_path = _get_module_path(program)
         if mod_path:
             header_name = module_to_filename(mod_path)
+            # All headers go to build_dir root so -I$(BUILD_DIR) finds them all
+            h_file = build_dir / header_name
             module_headers[mod_path] = header_name
-            # Write the header to the build dir
-            rel = pak_file.relative_to(root)
-            h_file = build_dir / rel.parent / header_name
-            h_file.parent.mkdir(parents=True, exist_ok=True)
             h_source = generate_header(program, mod_path)
             h_file.write_text(h_source, encoding='utf-8')
             if verbose:
+                rel = pak_file.relative_to(root)
                 print(f'  Header  {rel} -> {h_file.relative_to(root)}')
 
     # ── 4. Compile .pak → .c ─────────────────────────────────────────────────
