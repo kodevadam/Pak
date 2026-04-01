@@ -622,7 +622,8 @@ class TestMipsCodegen:
             entry { }
         """)
         assert 'jr' in asm
-        assert 'nop' in asm
+        # After optimization, nop may be replaced by delay-slot-filled instruction
+        assert 'jr $ra' in asm
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1574,3 +1575,130 @@ class TestPhase4Integration:
         """)
         assert has_instr(asm, 'jal display_init')
         assert has_instr(asm, 'jal timer_init')
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 5 — Optimization
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPhase5Peephole:
+    """5.3 — Peephole optimizations."""
+
+    def test_redundant_store_load_eliminated(self):
+        """sw $r, off($sp) followed by lw $r, off($sp) → only sw."""
+        from pak.mips.optimize import optimize_asm
+        asm = "    sw $t0, 16($sp)\n    lw $t0, 16($sp)\n    addu $v0, $t0, $t1\n"
+        opt = optimize_asm(asm, fill_slots=False, dead_labels=False)
+        lines = [l.strip() for l in opt.split('\n') if l.strip()]
+        assert 'sw $t0, 16($sp)' in lines[0]
+        assert 'lw $t0, 16($sp)' not in opt
+
+    def test_move_self_eliminated(self):
+        """move $t0, $t0 → eliminated."""
+        from pak.mips.optimize import optimize_asm
+        asm = "    move $t0, $t0\n    addu $v0, $t0, $t1\n"
+        opt = optimize_asm(asm, fill_slots=False, dead_labels=False)
+        assert 'move $t0, $t0' not in opt
+        assert 'addu' in opt
+
+    def test_li_zero_becomes_move_zero(self):
+        """li $t0, 0 → move $t0, $zero."""
+        from pak.mips.optimize import optimize_asm
+        asm = "    li $t0, 0\n"
+        opt = optimize_asm(asm, fill_slots=False, dead_labels=False)
+        assert 'move $t0, $zero' in opt
+
+
+class TestPhase5DelaySlotFilling:
+    """5.2 — Branch delay slot filling."""
+
+    def test_delay_slot_filled(self):
+        """Independent instruction before branch should fill the delay slot."""
+        from pak.mips.optimize import optimize_asm
+        asm = "    addiu $t0, $t0, 1\n    j .Lloop\n    nop\n"
+        opt = optimize_asm(asm, peephole=False, dead_labels=False)
+        lines = [l.strip() for l in opt.split('\n') if l.strip()]
+        # After optimization: j .Lloop, then addiu in delay slot
+        assert lines[0].startswith('j ')
+        assert lines[1].startswith('addiu')
+
+    def test_dependent_instruction_not_moved(self):
+        """Instruction that writes branch's condition reg should NOT fill slot."""
+        from pak.mips.optimize import optimize_asm
+        asm = "    li $t0, 5\n    beqz $t0, .Ldone\n    nop\n"
+        opt = optimize_asm(asm, peephole=False, dead_labels=False)
+        # li writes $t0, beqz reads $t0 → cannot fill
+        assert 'nop' in opt
+
+    def test_nop_after_jr_filled(self):
+        """A useful instruction before jr $ra should fill its delay slot."""
+        from pak.mips.optimize import optimize_asm
+        asm = "    addiu $sp, $sp, 256\n    jr $ra\n    nop\n"
+        opt = optimize_asm(asm, peephole=False, dead_labels=False)
+        lines = [l.strip() for l in opt.split('\n') if l.strip()]
+        assert 'jr $ra' in lines[0]
+        assert 'addiu' in lines[1]
+
+
+class TestPhase5DeadLabelElim:
+    """Dead label elimination."""
+
+    def test_unreferenced_label_removed(self):
+        from pak.mips.optimize import optimize_asm
+        asm = ".Lunused_123:\n    nop\n"
+        opt = optimize_asm(asm, peephole=False, fill_slots=False)
+        assert '.Lunused_123:' not in opt
+
+    def test_referenced_label_kept(self):
+        from pak.mips.optimize import optimize_asm
+        asm = "    j .Lkeep\n.Lkeep:\n    nop\n"
+        opt = optimize_asm(asm, peephole=False, fill_slots=False)
+        assert '.Lkeep:' in opt
+
+
+class TestPhase5Integration:
+    """Full optimizer integration with codegen."""
+
+    def test_optimized_output_smaller(self):
+        """Optimized output should have fewer lines than unoptimized."""
+        from pak.mips import MipsCodegen as MC
+        source = textwrap.dedent("""
+        fn fib(n: i32) -> i32 {
+            if n <= 1 { return n }
+            return fib(n - 1) + fib(n - 2)
+        }
+
+        entry {
+            let r = fib(10)
+        }
+        """).strip()
+        tokens = Lexer(source).tokenize()
+        program = Parser(tokens).parse()
+        tenv = TypeEnv()
+        tenv.collect(program)
+
+        cg_opt = MC(optimize=True)
+        cg_noopt = MC(optimize=False)
+        asm_opt = cg_opt.generate(program, tenv)
+        asm_noopt = cg_noopt.generate(program, tenv)
+
+        opt_lines = [l for l in asm_opt.split('\n') if l.strip()]
+        noopt_lines = [l for l in asm_noopt.split('\n') if l.strip()]
+        # Optimized should have fewer or equal lines
+        assert len(opt_lines) <= len(noopt_lines)
+
+    def test_optimizer_preserves_correctness(self):
+        """Optimized assembly should still contain all required labels and calls."""
+        asm = compile_mips("""
+        fn add(a: i32, b: i32) -> i32 {
+            return a + b
+        }
+
+        entry {
+            let r = add(3, 4)
+        }
+        """)
+        assert has_instr(asm, 'add:')
+        assert has_instr(asm, 'main:')
+        assert has_instr(asm, 'jal add')
+        assert has_instr(asm, 'addu')

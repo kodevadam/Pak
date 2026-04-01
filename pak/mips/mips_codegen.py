@@ -80,6 +80,7 @@ class CodegenError(Exception):
     pass
 
 
+from .optimize  import optimize_asm
 from .builtins  import (
     expand_sizeof, expand_offsetof, expand_align_of,
     emit_fixmul, emit_fixdiv, emit_int_to_fix, emit_fix_to_int,
@@ -163,7 +164,7 @@ class FnCtx:
 class MipsCodegen:
     """Translates a PAK Program AST into MIPS assembly text."""
 
-    def __init__(self, *, bounds_check: bool = False):
+    def __init__(self, *, bounds_check: bool = False, optimize: bool = True):
         self._em:      Emitter      = Emitter()
         self._tenv:    MipsTypeEnv  = MipsTypeEnv()
         self._pak_env: Optional[TypeEnv] = None
@@ -174,6 +175,7 @@ class MipsCodegen:
         self._fn_ctx:  Optional[FnCtx] = None
         self._label_n: int = 0
         self._bounds_check: bool = bounds_check
+        self._optimize: bool = optimize
         # Generic monomorphization: template_name → FnDecl
         self._generic_fns: Dict[str, ast.FnDecl] = {}
         # Already-emitted specializations: mangled_name → True
@@ -206,7 +208,10 @@ class MipsCodegen:
         self._pool.emit_rodata(self._em)
         self._pool.emit_data(self._em)
 
-        return self._em.getvalue()
+        raw = self._em.getvalue()
+        if self._optimize:
+            return optimize_asm(raw)
+        return raw
 
     # ── Backend validation ────────────────────────────────────────────────────
 
