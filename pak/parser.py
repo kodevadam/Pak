@@ -842,10 +842,8 @@ class Parser:
                         binding = self.expect(TT.IDENT).value
                     self.expect(TT.RPAREN)
                 pat = ast.DotAccess(obj=ast.Ident(name=name, line=line, col=col),
-                                    field=variant, line=line, col=col)
-                if binding:
-                    # Attach the binding as a named arg hack — codegen looks for it
-                    pat._binding = binding
+                                    field=variant, binding=binding or None,
+                                    line=line, col=col)
                 return pat
             return ast.Ident(name=name, line=line, col=col)
         elif self.check(TT.TRUE):
@@ -1047,10 +1045,10 @@ class Parser:
                         args.append(self.parse_expr())
                     self.match(TT.COMMA)
                 self.expect(TT.RPAREN)
-                # Pick up any pending generic type args stored on the func ident
-                type_args = getattr(expr, '_pending_type_args', [])
-                if hasattr(expr, '_pending_type_args'):
-                    del expr._pending_type_args
+                # Pick up turbofish type args stored on the func ident (e.g. foo::<i32>())
+                type_args = expr.type_args if isinstance(expr, ast.Ident) else []
+                if isinstance(expr, ast.Ident) and expr.type_args:
+                    expr.type_args = []   # consume; field exists so no deletion needed
                 expr = ast.Call(func=expr, args=args, type_args=type_args, line=line, col=col)
             elif self.check(TT.LBRACKET):
                 self.advance()
@@ -1337,8 +1335,7 @@ class Parser:
                 # Discard type args, they were probably a comparison
                 pass
             elif type_args:
-                # Store type args for pick-up in parse_postfix as a temporary node
-                ident._pending_type_args = type_args
+                ident.type_args = type_args
             return ident
 
         if tok.type == TT.INT:

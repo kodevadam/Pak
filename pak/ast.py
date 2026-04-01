@@ -134,6 +134,8 @@ class Ident:
     name: str
     line: int = 0
     col: int = 0
+    # Turbofish type arguments, e.g. foo::<i32>() — populated by parser, read by codegen
+    type_args: List[Any] = field(default_factory=list)
 
 @dataclass
 class DotAccess:
@@ -141,6 +143,8 @@ class DotAccess:
     field: str
     line: int = 0
     col: int = 0
+    # For variant match patterns: Variant.case(binding) — holds the bound variable name
+    binding: Optional[str] = None
 
 @dataclass
 class IndexAccess:

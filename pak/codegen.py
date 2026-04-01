@@ -2706,12 +2706,12 @@ class Codegen:
             lines.append(f'{inner_pad}{{')
             self.scope_push()
             # Emit variant binding if pattern has one: Type.Case(binding)
-            if isinstance(pat, ast.DotAccess) and hasattr(pat, '_binding') and pat._binding:
+            if isinstance(pat, ast.DotAccess) and pat.binding:
                 obj_name = self.gen_expr(pat.obj)
                 if obj_name in self.variant_types:
                     field_name = pat.field.lower()
-                    lines.append(f'{inner2_pad}__auto_type {pat._binding} = {expr}.data.{field_name};')
-                    self.scope_set(pat._binding, ast.TypeName(name='auto'))
+                    lines.append(f'{inner2_pad}__auto_type {pat.binding} = {expr}.data.{field_name};')
+                    self.scope_set(pat.binding, ast.TypeName(name='auto'))
             if isinstance(arm.body, ast.Block):
                 for stmt in arm.body.stmts:
                     lines.append(self.gen_stmt(stmt, indent + 2))
