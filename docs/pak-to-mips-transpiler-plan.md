@@ -352,14 +352,21 @@ The C transpiler can be retired when ALL of the following hold:
 ## Execution Order Summary
 
 ```
-Phase 0  [Scaffolding]     ██░░░░░░░░  — Test harness, module structure, runtime stubs
-Phase 1  [Minimal]         ████░░░░░░  — Expressions, variables, functions, control flow
-Phase 2  [Types]           ██████░░░░  — Structs, enums, variants, slices, Result/Option
-Phase 3  [Advanced]        ████████░░  — Fixed-point, generics, defer, closures, inline asm
-Phase 4  [N64 Hardware]    ██████████  — Module FFI, assets, DMA, volatile
-Phase 5  [Optimization]    ██████████  — Register alloc, delay slots, peephole, scheduling
-Phase 6  [Test Game]       ▓▓▓▓▓▓▓▓▓▓  — Runs continuously from Phase 1 onward
+Phase 0  [Scaffolding]     ██████████  ✅ DONE — Module structure, register alloc, ABI, emitter, types, builtins, runtime, literals
+Phase 1  [Minimal]         ██████████  ✅ DONE — Expressions, variables, functions, control flow, entry block, match, for-range/each
+Phase 2  [Types]           ██████████  ✅ DONE — Struct field widths, struct copy, variants, enums, slices, Result/Option, bounds check
+Phase 3  [Advanced]        ██████████  ✅ DONE — Fixed-point Q16.16/Q10.5/Q1.15, generics (monomorphization), defer LIFO, closures, inline asm, impl methods, trait dispatch
+Phase 4  [N64 Hardware]    ██████████  ✅ DONE — N64Runtime module FFI (display, rdpq, controller, timer, debug, sprite, audio, model), asset externs, aligned statics
+Phase 5  [Optimization]    ██████████  ✅ DONE — Peephole (li→move, self-move elim, store-load elim, li+addu→addiu), delay slot filling, dead label elimination
+Phase 5b [CLI Integration] ██████████  ✅ DONE — `pak build --backend mips`, `pak explain --backend mips`, Makefile .s support
+Phase 6  [Test Game]       ▓▓░░░░░░░░  — In progress: scaffold next
 Phase 7  [Graduation]      ──────────  — Retire the C path
 ```
+
+### Implementation Stats
+- **pak/mips/mips_codegen.py**: ~1800 lines — full AST walker, backend validation
+- **pak/mips/optimize.py**: ~250 lines — 3-pass post-processing optimizer
+- **Test coverage**: 135 MIPS codegen tests + 11 CLI integration tests = 146 MIPS-specific tests
+- **Total test suite**: 187 tests (including 41 checker tests), all passing
 
 Phase 6 is not sequential — it grows alongside every other phase. Each time a new feature lands in the MIPS backend, the test game adds code that uses it, and we diff again.

@@ -4,10 +4,51 @@ from pathlib import Path
 from typing import List, Optional
 
 
+def _objs_block(is_mips: bool) -> str:
+    """Return the OBJS/DEPS variable definitions for the Makefile."""
+    if is_mips:
+        return """\
+C_SRCS  = $(filter %.c,$(SRCS))
+S_SRCS  = $(filter %.s,$(SRCS))
+C_OBJS  = $(C_SRCS:%.c=$(BUILD_DIR)/%.o)
+S_OBJS  = $(S_SRCS:%.s=$(BUILD_DIR)/%.o)
+OBJS    = $(C_OBJS) $(S_OBJS)
+DEPS    = $(C_OBJS:.o=.d)"""
+    else:
+        return """\
+OBJS = $(SRCS:%.c=$(BUILD_DIR)/%.o)
+DEPS = $(OBJS:.o=.d)"""
+
+
+def _compile_rules(is_mips: bool) -> str:
+    """Return the compile rules section of the Makefile."""
+    if is_mips:
+        return """\
+# Assemble MIPS sources (.s)
+$(BUILD_DIR)/%.o: %.s
+\t@mkdir -p $(dir $@)
+\t$(CC) $(N64_CFLAGS) -c $< -o $@
+
+# Compile C sources (runtime)
+$(BUILD_DIR)/%.o: %.c
+\t@mkdir -p $(dir $@)
+\t$(CC) $(CFLAGS) $(N64_CFLAGS) -MMD -c $< -o $@
+
+-include $(DEPS)"""
+    else:
+        return """\
+# Compile C sources
+$(BUILD_DIR)/%.o: %.c
+\t@mkdir -p $(dir $@)
+\t$(CC) $(CFLAGS) $(N64_CFLAGS) -MMD -c $< -o $@
+
+-include $(DEPS)"""
+
+
 def generate_makefile(
     project_name: str,
     rom_title: str,
-    c_files: List[Path],          # paths relative to project root
+    c_files: List[Path],          # paths relative to project root (.c or .s)
     pakfs_archive: Optional[str],  # filename like "mygame.pakfs", or None
     save_type: str = 'none',
     bit_depth: int = 16,
@@ -16,15 +57,17 @@ def generate_makefile(
     optimization: str = 'debug',
     use_tiny3d: bool = False,
     project_root: Path = Path('.'),
+    backend: str = 'c',
 ) -> str:
     """Return the content of a Makefile for this project."""
 
-    # Resolve C source paths relative to project root
+    # Resolve source paths relative to project root
     src_list = ' \\\n        '.join(str(f) for f in c_files)
 
-    # Also include the pakfs runtime
+    # Also include the pakfs runtime (always C)
     src_list += ' \\\n        runtime/pakfs.c'
 
+    is_mips = backend == 'mips'
     opt_flag = '-O2' if optimization == 'release' else '-g -O0'
 
     res_w, res_h = resolution.split('x')
@@ -90,8 +133,7 @@ RUNTIME_DIR     = $(shell pak --runtime-dir 2>/dev/null || echo runtime)
 
 SRCS = {src_list}
 
-OBJS = $(SRCS:%.c=$(BUILD_DIR)/%.o)
-DEPS = $(OBJS:.o=.d)
+{_objs_block(is_mips)}
 
 CFLAGS  += {opt_flag} -Wall -Wextra
 CFLAGS  += -DRESOLUTION=$(RESOLUTION) -DBIT_DEPTH=$(BIT_DEPTH)
@@ -119,12 +161,7 @@ $(PROJECT_NAME).z64: $(PROJECT_NAME).elf{" $(DFS_FILE)" if dfs_file else ""}
 \t    --header $(N64_INST)/mips64-elf/lib/header \\
 \t    $<{" $(DFS_FILE)" if dfs_file else ""}
 
-# Compile C sources
-$(BUILD_DIR)/%.o: %.c
-\t@mkdir -p $(dir $@)
-\t$(CC) $(CFLAGS) $(N64_CFLAGS) -MMD -c $< -o $@
-
--include $(DEPS)
+{_compile_rules(is_mips)}
 
 {asset_rules}
 {pakfs_rule}
