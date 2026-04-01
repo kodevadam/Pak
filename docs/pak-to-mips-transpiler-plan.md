@@ -359,14 +359,15 @@ Phase 3  [Advanced]        ██████████  ✅ DONE — Fixed-po
 Phase 4  [N64 Hardware]    ██████████  ✅ DONE — N64Runtime module FFI (display, rdpq, controller, timer, debug, sprite, audio, model), asset externs, aligned statics
 Phase 5  [Optimization]    ██████████  ✅ DONE — Peephole (li→move, self-move elim, store-load elim, li+addu→addiu), delay slot filling, dead label elimination
 Phase 5b [CLI Integration] ██████████  ✅ DONE — `pak build --backend mips`, `pak explain --backend mips`, Makefile .s support
-Phase 6  [Test Game]       ▓▓░░░░░░░░  — In progress: scaffold next
-Phase 7  [Graduation]      ──────────  — Retire the C path
+Phase 6  [Test Game]       ██████████  ✅ DONE — "Dungeon of Types" scaffold: structs, variants, methods, fixed-point, defer, Result, inline asm, nested control flow
+Phase 7  [Graduation]      ████████░░  🔶 IN PROGRESS — Differential testing (22 tests), example compilation (2/3 pass), xfail: model_viewer (needs external types)
 ```
 
 ### Implementation Stats
 - **pak/mips/mips_codegen.py**: ~1800 lines — full AST walker, backend validation
 - **pak/mips/optimize.py**: ~250 lines — 3-pass post-processing optimizer
-- **Test coverage**: 135 MIPS codegen tests + 11 CLI integration tests = 146 MIPS-specific tests
-- **Total test suite**: 187 tests (including 41 checker tests), all passing
+- **Test coverage**: 154 MIPS codegen tests + 11 CLI tests + 25 differential tests = 190 MIPS-specific tests
+- **Total test suite**: 231 tests (including 41 checker tests), 230 passing + 1 xfail
+- **Example programs**: features.pak ✅, sprite_game.pak ✅, model_viewer.pak ❌ (external type dependency)
 
 Phase 6 is not sequential — it grows alongside every other phase. Each time a new feature lands in the MIPS backend, the test game adds code that uses it, and we diff again.
