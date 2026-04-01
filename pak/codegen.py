@@ -112,6 +112,244 @@ MODULE_API: dict = {
     ('t3d', 'viewport_set_fov'):   't3d_viewport_set_fov',
     ('t3d', 'set_camera'):         't3d_set_camera',
     ('t3d', 'look_at'):            't3d_look_at',
+
+    # t3d.anim — skeletal animation
+    ('t3d', 'anim_create'):        't3d_anim_create',
+    ('t3d', 'anim_destroy'):       't3d_anim_destroy',
+    ('t3d', 'anim_set_playing'):   't3d_anim_set_playing',
+    ('t3d', 'anim_set_looping'):   't3d_anim_set_looping',
+    ('t3d', 'anim_set_speed'):     't3d_anim_set_speed',
+    ('t3d', 'anim_update'):        't3d_anim_update',
+    ('t3d', 'anim_attach'):        't3d_anim_attach',
+
+    # t3d.skeleton
+    ('t3d', 'skeleton_create'):    't3d_skeleton_create',
+    ('t3d', 'skeleton_destroy'):   't3d_skeleton_destroy',
+    ('t3d', 'skeleton_update'):    't3d_skeleton_update',
+    ('t3d', 'skeleton_draw'):      't3d_skeleton_draw',
+
+    # n64.rumble — Rumble Pak
+    ('rumble', 'init'):            'rumble_init',
+    ('rumble', 'start'):           'rumble_start',
+    ('rumble', 'stop'):            'rumble_stop',
+    ('rumble', 'is_plugged'):      lambda args: f'(joypad_get_accessory_type({args[0] if args else "0"}) == JOYPAD_ACCESSORY_TYPE_RUMBLE_PAK)',
+
+    # n64.cpak — Controller Pak (memory card)
+    ('cpak', 'init'):              'cpak_init',
+    ('cpak', 'is_plugged'):        'cpak_is_plugged',
+    ('cpak', 'is_formatted'):      'cpak_is_formatted',
+    ('cpak', 'format'):            'cpak_format',
+    ('cpak', 'read_sector'):       'cpak_read_sector',
+    ('cpak', 'write_sector'):      'cpak_write_sector',
+    ('cpak', 'get_free_space'):    'cpak_get_free_space',
+
+    # n64.tpak — Transfer Pak (GB/GBC cartridge adapter)
+    ('tpak', 'init'):              'tpak_init',
+    ('tpak', 'set_power'):         'tpak_set_power',
+    ('tpak', 'get_status'):        'tpak_get_status',
+    ('tpak', 'read'):              'tpak_read',
+    ('tpak', 'write'):             'tpak_write',
+
+    # n64.backup — Save memory (EEPROM / SRAM / FlashRAM unified API)
+    ('backup', 'type'):            'backup_type',
+    ('backup', 'read'):            'backup_read',
+    ('backup', 'write'):           'backup_write',
+    ('backup', 'size'):            'backup_size',
+
+    # n64.eeprom — Direct EEPROM access
+    ('eeprom', 'init'):            'eeprom_init',
+    ('eeprom', 'read'):            'eeprom_read',
+    ('eeprom', 'write'):           'eeprom_write',
+
+    # n64.sram — SRAM save memory
+    ('sram', 'read'):              'sram_read',
+    ('sram', 'write'):             'sram_write',
+
+    # n64.flashram — FlashRAM save memory
+    ('flashram', 'read'):          'flashram_read',
+    ('flashram', 'write'):         'flashram_write',
+    ('flashram', 'erase_sector'):  'flashram_erase_sector',
+
+    # n64.rtc — Real-Time Clock (cartridge RTC, e.g. Pokémon Stadium)
+    ('rtc', 'init'):               'rtc_init',
+    ('rtc', 'get'):                'rtc_get',
+    ('rtc', 'set'):                'rtc_set',
+    ('rtc', 'is_stopped'):         'rtc_is_stopped',
+    ('rtc', 'is_running'):         lambda args: '!rtc_is_stopped()',
+
+    # n64.mouse — N64 Mouse accessory
+    ('mouse', 'init'):             'joypad_init',
+    ('mouse', 'poll'):             'joypad_poll',
+    ('mouse', 'get_delta_x'):      lambda args: f'joypad_get_axis_pressed({args[0] if args else "0"}, JOYPAD_AXIS_STICK_X)',
+    ('mouse', 'get_delta_y'):      lambda args: f'joypad_get_axis_pressed({args[0] if args else "0"}, JOYPAD_AXIS_STICK_Y)',
+    ('mouse', 'get_buttons'):      lambda args: f'joypad_get_buttons_pressed({args[0] if args else "0"})',
+
+    # n64.vru — Voice Recognition Unit
+    ('vru', 'init'):               'vru_init',
+    ('vru', 'close'):              'vru_close',
+    ('vru', 'read_word'):          'vru_read_word',
+    ('vru', 'write_word_list'):    'vru_write_word_list',
+    ('vru', 'is_ready'):           'vru_is_ready',
+
+    # n64.system — Expansion Pak, memory, CPU timing
+    ('system', 'memory_size'):     'get_memory_size',
+    ('system', 'has_expansion'):   lambda args: '(get_memory_size() > 0x400000)',
+    ('system', 'ticks'):           lambda args: 'TICKS_READ()',
+    ('system', 'ticks_to_ms'):     lambda args: f'TICKS_TO_MS({args[0]})',
+    ('system', 'reset'):           lambda args: 'n64sys_reset()',
+    ('system', 'tv_type'):         lambda args: 'sys_tv_type()',
+
+    # n64.disk — 64DD disk drive
+    ('disk', 'init'):              'disk_init',
+    ('disk', 'close'):             'disk_close',
+    ('disk', 'read_sector'):       'disk_read_sector',
+    ('disk', 'write_sector'):      'disk_write_sector',
+    ('disk', 'get_disk_type'):     'disk_get_disk_type',
+    ('disk', 'is_present'):        'disk_is_present',
+
+    # n64.rsp — RSP microcode / RSPQ command queue
+    ('rsp', 'init'):               'rspq_init',
+    ('rsp', 'close'):              'rspq_close',
+    ('rsp', 'wait'):               'rspq_wait',
+    ('rsp', 'syncpoint_new'):      'rspq_syncpoint_new',
+    ('rsp', 'syncpoint_check'):    'rspq_syncpoint_check',
+    ('rsp', 'block_begin'):        'rspq_block_begin',
+    ('rsp', 'block_end'):          'rspq_block_end',
+    ('rsp', 'block_run'):          'rspq_block_run',
+    ('rsp', 'block_free'):         'rspq_block_free',
+
+    # n64.rdpq.tex — Texture loading helpers
+    ('rdpq_tex', 'upload'):        'rdpq_tex_upload',
+    ('rdpq_tex', 'upload_sub'):    'rdpq_tex_upload_sub',
+    ('rdpq_tex', 'multi_begin'):   'rdpq_tex_multi_begin',
+    ('rdpq_tex', 'multi_end'):     'rdpq_tex_multi_end',
+
+    # n64.rdpq.font — Font / text rendering
+    ('rdpq_font', 'load'):         'rdpq_font_load',
+    ('rdpq_font', 'free'):         'rdpq_font_free',
+    ('rdpq_font', 'draw_text'):    'rdpq_text_print',
+    ('rdpq_font', 'measure'):      'rdpq_text_measure',
+    ('rdpq_font', 'register'):     'rdpq_font_register',
+
+    # n64.rdpq.mode — Blending / combine modes
+    ('rdpq_mode', 'push'):         'rdpq_mode_push',
+    ('rdpq_mode', 'pop'):          'rdpq_mode_pop',
+    ('rdpq_mode', 'standard'):     'rdpq_set_mode_standard',
+    ('rdpq_mode', 'copy'):         'rdpq_set_mode_copy',
+    ('rdpq_mode', 'zbuf'):         lambda args: f'rdpq_mode_zbuf(true, {args[0] if args else "true"})',
+    ('rdpq_mode', 'blending'):     lambda args: f'rdpq_mode_blending({args[0] if args else "RDPQ_BLENDING_MULTIPLY"})',
+    ('rdpq_mode', 'antialias'):    lambda args: f'rdpq_mode_antialias({args[0] if args else "AA_STANDARD"})',
+
+    # n64.audio.mixer — Software mixer
+    ('mixer', 'init'):             'mixer_init',
+    ('mixer', 'close'):            'mixer_close',
+    ('mixer', 'ch_play'):          'mixer_ch_play',
+    ('mixer', 'ch_stop'):          'mixer_ch_stop',
+    ('mixer', 'ch_set_vol'):       'mixer_ch_set_vol',
+    ('mixer', 'ch_set_freq'):      'mixer_ch_set_freq',
+    ('mixer', 'poll'):             'audio_poll',
+
+    # n64.audio.xm — XM tracker music
+    ('xm64', 'open'):              'xm64player_open',
+    ('xm64', 'close'):             'xm64player_close',
+    ('xm64', 'play'):              'xm64player_play',
+    ('xm64', 'stop'):              'xm64player_stop',
+    ('xm64', 'set_vol'):           'xm64player_set_vol',
+
+    # n64.audio.wav — WAV sample playback
+    ('wav64', 'open'):             'wav64_open',
+    ('wav64', 'close'):            'wav64_close',
+    ('wav64', 'play'):             'wav64_play',
+    ('wav64', 'set_loop'):         'wav64_set_loop',
+
+    # n64.surface — Off-screen surfaces / render targets
+    ('surface', 'alloc'):          'surface_alloc',
+    ('surface', 'free'):           'surface_free',
+    ('surface', 'make_sub'):       'surface_make_sub',
+
+    # n64.math — Fixed-point / vector math helpers
+    ('math', 'abs_i32'):           lambda args: f'abs({args[0]})',
+    ('math', 'min_i32'):           lambda args: f'MIN({args[0]}, {args[1]})',
+    ('math', 'max_i32'):           lambda args: f'MAX({args[0]}, {args[1]})',
+    ('math', 'clamp_i32'):         lambda args: f'CLAMP({args[0]}, {args[1]}, {args[2]})',
+    ('math', 'sin_f'):             lambda args: f'sinf({args[0]})',
+    ('math', 'cos_f'):             lambda args: f'cosf({args[0]})',
+    ('math', 'sqrt_f'):            lambda args: f'sqrtf({args[0]})',
+    ('math', 'atan2_f'):           lambda args: f'atan2f({args[0]}, {args[1]})',
+    ('math', 'lerp_f'):            lambda args: f'({args[0]} + ({args[1]} - {args[0]}) * {args[2]})',
+    ('math', 'fix_to_f'):          lambda args: f'((float)({args[0]}) / 65536.0f)',
+    ('math', 'f_to_fix'):          lambda args: f'((int32_t)(({args[0]}) * 65536.0f))',
+
+    # Aliases for nested module keys — allow `mixer.ch_play(...)` etc.
+    ('mixer', 'init'):             'mixer_init',
+    ('mixer', 'close'):            'mixer_close',
+    ('mixer', 'ch_play'):          'mixer_ch_play',
+    ('mixer', 'ch_stop'):          'mixer_ch_stop',
+    ('mixer', 'ch_set_vol'):       'mixer_ch_set_vol',
+    ('mixer', 'ch_set_freq'):      'mixer_ch_set_freq',
+    ('mixer', 'poll'):             'audio_poll',
+
+    ('xm64', 'open'):              'xm64player_open',
+    ('xm64', 'close'):             'xm64player_close',
+    ('xm64', 'play'):              'xm64player_play',
+    ('xm64', 'stop'):              'xm64player_stop',
+    ('xm64', 'set_vol'):           'xm64player_set_vol',
+
+    ('wav64', 'open'):             'wav64_open',
+    ('wav64', 'close'):            'wav64_close',
+    ('wav64', 'play'):             'wav64_play',
+    ('wav64', 'set_loop'):         'wav64_set_loop',
+
+    ('rdpq_tex', 'upload'):        'rdpq_tex_upload',
+    ('rdpq_tex', 'upload_sub'):    'rdpq_tex_upload_sub',
+    ('rdpq_tex', 'multi_begin'):   'rdpq_tex_multi_begin',
+    ('rdpq_tex', 'multi_end'):     'rdpq_tex_multi_end',
+
+    ('rdpq_font', 'load'):         'rdpq_font_load',
+    ('rdpq_font', 'free'):         'rdpq_font_free',
+    ('rdpq_font', 'draw_text'):    'rdpq_text_print',
+    ('rdpq_font', 'measure'):      'rdpq_text_measure',
+    ('rdpq_font', 'register'):     'rdpq_font_register',
+
+    ('rdpq_mode', 'push'):         'rdpq_mode_push',
+    ('rdpq_mode', 'pop'):          'rdpq_mode_pop',
+    ('rdpq_mode', 'standard'):     'rdpq_set_mode_standard',
+    ('rdpq_mode', 'copy'):         'rdpq_set_mode_copy',
+    ('rdpq_mode', 'zbuf'):         lambda args: f'rdpq_mode_zbuf(true, {args[0] if args else "true"})',
+    ('rdpq_mode', 'blending'):     lambda args: f'rdpq_mode_blending({args[0] if args else "RDPQ_BLENDING_MULTIPLY"})',
+    ('rdpq_mode', 'antialias'):    lambda args: f'rdpq_mode_antialias({args[0] if args else "AA_STANDARD"})',
+
+    ('sram', 'read'):              'sram_read',
+    ('sram', 'write'):             'sram_write',
+
+    ('flashram', 'read'):          'flashram_read',
+    ('flashram', 'write'):         'flashram_write',
+    ('flashram', 'erase_sector'):  'flashram_erase_sector',
+
+    ('eeprom', 'init'):            'eeprom_init',
+    ('eeprom', 'read'):            'eeprom_read',
+    ('eeprom', 'write'):           'eeprom_write',
+
+    ('surface', 'alloc'):          'surface_alloc',
+    ('surface', 'free'):           'surface_free',
+    ('surface', 'make_sub'):       'surface_make_sub',
+
+    ('rsp', 'init'):               'rspq_init',
+    ('rsp', 'close'):              'rspq_close',
+    ('rsp', 'wait'):               'rspq_wait',
+    ('rsp', 'syncpoint_new'):      'rspq_syncpoint_new',
+    ('rsp', 'syncpoint_check'):    'rspq_syncpoint_check',
+    ('rsp', 'block_begin'):        'rspq_block_begin',
+    ('rsp', 'block_end'):          'rspq_block_end',
+    ('rsp', 'block_run'):          'rspq_block_run',
+    ('rsp', 'block_free'):         'rspq_block_free',
+
+    ('disk', 'init'):              'disk_init',
+    ('disk', 'close'):             'disk_close',
+    ('disk', 'read_sector'):       'disk_read_sector',
+    ('disk', 'write_sector'):      'disk_write_sector',
+    ('disk', 'get_disk_type'):     'disk_get_disk_type',
+    ('disk', 'is_present'):        'disk_is_present',
 }
 
 
@@ -163,27 +401,59 @@ PRIMITIVE_TYPES = {
 }
 
 USE_INCLUDES = {
-    'n64.display': '#include <display.h>',
-    'n64.controller': '#include <joypad.h>',
-    'n64.rdpq': '#include <rdpq.h>\n#include <rdpq_gfx.h>',
-    'n64.sprite': '#include <rdpq_sprite.h>',
-    'n64.audio': '#include <audio.h>\n#include <xm64.h>\n#include <wav64.h>',
-    'n64.timer': '#include <n64sys.h>',
-    'n64.dma': '#include <dma.h>',
-    'n64.cache': '#include <n64sys.h>',
-    'n64.eeprom': '#include <eeprom.h>',
-    'n64.debug': '#include <debug.h>',
-    'n64.math': '#include <n64sys.h>',
-    'n64.mem': '#include <malloc.h>',
-    't3d.core': '#include <t3d/t3d.h>',
-    't3d.model': '#include <t3d/t3dmodel.h>',
-    't3d.math': '#include <t3d/t3dmath.h>',
-    't3d.anim': '#include <t3d/t3danim.h>',
-    't3d.light': '#include <t3d/t3dlight.h>',
-    't3d.viewport': '#include <t3d/t3d.h>',
-    't3d.skeleton': '#include <t3d/t3dskeleton.h>',
-    'n64.surface': '#include <surface.h>',
-    't3d.math': '#include <t3d/t3dmath.h>',
+    # Core display / rendering
+    'n64.display':      '#include <display.h>',
+    'n64.controller':   '#include <joypad.h>',
+    'n64.rdpq':         '#include <rdpq.h>\n#include <rdpq_gfx.h>',
+    'n64.sprite':       '#include <rdpq_sprite.h>',
+    'n64.surface':      '#include <surface.h>',
+
+    # Audio
+    'n64.audio':        '#include <audio.h>\n#include <xm64.h>\n#include <wav64.h>',
+    'n64.mixer':        '#include <audio.h>\n#include <mixer.h>',
+    'n64.xm64':         '#include <xm64.h>',
+    'n64.wav64':        '#include <wav64.h>',
+
+    # System
+    'n64.timer':        '#include <n64sys.h>',
+    'n64.system':       '#include <n64sys.h>',
+    'n64.dma':          '#include <dma.h>',
+    'n64.cache':        '#include <n64sys.h>',
+    'n64.debug':        '#include <debug.h>',
+    'n64.math':         '#include <n64sys.h>\n#include <math.h>',
+    'n64.mem':          '#include <malloc.h>',
+    'n64.rsp':          '#include <rspq.h>',
+
+    # Save memory
+    'n64.eeprom':       '#include <eeprom.h>',
+    'n64.backup':       '#include <backup.h>',
+    'n64.sram':         '#include <backup.h>',
+    'n64.flashram':     '#include <backup.h>',
+
+    # RDP texture / font / mode helpers
+    'n64.rdpq_tex':     '#include <rdpq_tex.h>',
+    'n64.rdpq_font':    '#include <rdpq_font.h>\n#include <rdpq_text.h>',
+    'n64.rdpq_mode':    '#include <rdpq_mode.h>',
+
+    # Accessories
+    'n64.rumble':       '#include <joypad.h>\n#include <rumble.h>',
+    'n64.cpak':         '#include <cpak.h>',
+    'n64.tpak':         '#include <tpak.h>',
+    'n64.mouse':        '#include <joypad.h>',
+    'n64.vru':          '#include <vru.h>',
+    'n64.rtc':          '#include <rtc.h>',
+
+    # 64DD disk drive
+    'n64.disk':         '#include <disk.h>',
+
+    # Tiny3D
+    't3d.core':         '#include <t3d/t3d.h>',
+    't3d.model':        '#include <t3d/t3dmodel.h>',
+    't3d.math':         '#include <t3d/t3dmath.h>',
+    't3d.anim':         '#include <t3d/t3danim.h>',
+    't3d.light':        '#include <t3d/t3dlight.h>',
+    't3d.viewport':     '#include <t3d/t3d.h>',
+    't3d.skeleton':     '#include <t3d/t3dskeleton.h>',
 }
 
 
@@ -206,6 +476,9 @@ class Codegen:
         self.variant_types: set = set()  # names of variant (tagged-union) types
         # struct_name → {field_name: type_node} — populated in gen_program pass 1
         self.struct_fields: dict = {}
+        # Ordered list of (typedef_name, inner_c_type) for fat slices — deduped
+        self._slice_typedefs: List[tuple] = []
+        self._slice_typedef_names: set = set()
         # Map of user module path → generated header filename (for cross-module includes)
         self.module_headers: dict = module_headers or {}
         # Scope stack: {name: type_node}
@@ -299,6 +572,20 @@ class Codegen:
     def dec(self):
         self.indent -= 1
 
+    def _slice_typedef(self, inner_type) -> str:
+        """Return the C typedef name for a fat slice of inner_type.
+        Registers the typedef for emission before the code body.
+        """
+        c_inner = self.gen_type(inner_type)
+        # Sanitize inner type name for use in a C identifier
+        safe = (c_inner.replace(' ', '_').replace('*', 'p')
+                       .replace(',', '').replace('(', '').replace(')', ''))
+        typedef_name = f'PakSlice_{safe}'
+        if typedef_name not in self._slice_typedef_names:
+            self._slice_typedef_names.add(typedef_name)
+            self._slice_typedefs.append((typedef_name, c_inner))
+        return typedef_name
+
     def gen_type(self, t) -> str:
         if t is None:
             return 'void'
@@ -306,16 +593,10 @@ class Codegen:
             return PRIMITIVE_TYPES.get(t.name, t.name)
         if isinstance(t, ast.TypePointer):
             inner = self.gen_type(t.inner)
-            q = '' if t.mutable else 'const '
-            # Don't add const for mutable pointers
-            if t.mutable:
-                return f'{inner} *'
-            if t.nullable:
-                return f'{inner} *'
             return f'{inner} *'
         if isinstance(t, ast.TypeSlice):
-            # Slices become pointer + we lose length info in C (simplification)
-            return f'{self.gen_type(t.inner)} *'
+            # Fat slice: struct { T *data; int32_t len; }
+            return self._slice_typedef(t.inner)
         if isinstance(t, ast.TypeArray):
             inner = self.gen_type(t.inner)
             size = self.gen_expr(t.size)
@@ -378,10 +659,33 @@ class Codegen:
             # Chained access on a non-ident expression
             return f'{obj_str}.{e.field}'
         if isinstance(e, ast.IndexAccess):
-            return f'{self.gen_expr(e.obj)}[{self.gen_expr(e.index)}]'
+            obj_str = self.gen_expr(e.obj)
+            obj_type = self._expr_type(e.obj)
+            idx_str = self.gen_expr(e.index)
+            if isinstance(obj_type, ast.TypeSlice):
+                return f'({obj_str}).data[{idx_str}]'
+            return f'{obj_str}[{idx_str}]'
         if isinstance(e, ast.SliceExpr):
+            obj_str = self.gen_expr(e.obj)
             start = self.gen_expr(e.start) if e.start else '0'
-            return f'&{self.gen_expr(e.obj)}[{start}]'
+            obj_type = self._expr_type(e.obj)
+            if e.end:
+                end_str = self.gen_expr(e.end)
+                length = f'({end_str}) - ({start})'
+            elif isinstance(obj_type, ast.TypeArray) and isinstance(obj_type.size, ast.IntLit):
+                # arr[start..] — use full array size minus start
+                length = f'(int)(sizeof({obj_str})/sizeof(({obj_str})[0])) - ({start})'
+            else:
+                length = f'/* slice length unknown */ 0'
+            # Determine inner type for the PakSlice typedef
+            if isinstance(obj_type, ast.TypeArray):
+                inner_type = obj_type.inner
+            elif isinstance(obj_type, ast.TypeSlice):
+                inner_type = obj_type.inner
+            else:
+                inner_type = ast.TypeName(name='auto')
+            typedef_name = self._slice_typedef(inner_type)
+            return f'({typedef_name}){{ .data = &({obj_str})[{start}], .len = {length} }}'
         if isinstance(e, ast.NamedArg):
             return self.gen_expr(e.value)
         if isinstance(e, ast.Call):
@@ -446,7 +750,10 @@ class Codegen:
                 return f'{self.enum_variants[e.name]}_{e.name}'
             return e.name
         if isinstance(e, ast.CatchExpr):
-            # Simplified: just evaluate the expression
+            # CatchExpr is a statement-level expression that requires a pre-statement.
+            # We emit the inner expression inline; the handler is emitted as a separate
+            # statement by gen_let_stmt when it detects a CatchExpr value.
+            # For standalone use (not in a let binding), just evaluate the inner expr.
             return self.gen_expr(e.expr)
         if isinstance(e, ast.NullCheck):
             return self.gen_expr(e.expr)
@@ -522,7 +829,7 @@ class Codegen:
         if self.assets:
             out_lines.append('')
 
-        # Generate declarations
+        # Generate declarations — this populates _slice_typedefs as a side effect
         body_lines = []
         has_entry = False
         for decl in program.decls:
@@ -534,6 +841,13 @@ class Codegen:
                 body_lines.append('')
             if isinstance(decl, ast.EntryBlock):
                 has_entry = True
+
+        # Fat-slice typedefs (emitted after includes so inner types are visible,
+        # and after body generation so all slices have been encountered)
+        if self._slice_typedefs:
+            out_lines.append('')
+            for typedef_name, c_inner in self._slice_typedefs:
+                out_lines.append(f'typedef struct {{ {c_inner} *data; int32_t len; }} {typedef_name};')
 
         out_lines.extend(body_lines)
         return '\n'.join(out_lines)
@@ -807,48 +1121,77 @@ class Codegen:
     def gen_if(self, s: ast.IfStmt, pad: str, indent: int) -> str:
         cond = self.gen_expr(s.condition)
         lines = [f'{pad}if ({cond}) {{']
+        self.scope_push()
         for stmt in s.then.stmts:
             lines.append(self.gen_stmt(stmt, indent + 1))
+        for d in self._emit_defers_for_scope(-1, pad, indent + 1):
+            lines.append(d)
+        self.scope_pop()
         lines.append(f'{pad}}}')
         for ec, eb in s.elif_branches:
             lines.append(f'{pad}else if ({self.gen_expr(ec)}) {{')
+            self.scope_push()
             for stmt in eb.stmts:
                 lines.append(self.gen_stmt(stmt, indent + 1))
+            for d in self._emit_defers_for_scope(-1, pad, indent + 1):
+                lines.append(d)
+            self.scope_pop()
             lines.append(f'{pad}}}')
         if s.else_branch:
             lines.append(f'{pad}else {{')
+            self.scope_push()
             for stmt in s.else_branch.stmts:
                 lines.append(self.gen_stmt(stmt, indent + 1))
+            for d in self._emit_defers_for_scope(-1, pad, indent + 1):
+                lines.append(d)
+            self.scope_pop()
             lines.append(f'{pad}}}')
         return '\n'.join(l for l in lines if l is not None)
 
     def gen_null_check(self, s: ast.NullCheckStmt, pad: str, indent: int) -> str:
         expr = self.gen_expr(s.expr)
-        lines = [f'{pad}if ({expr} != NULL) {{']
         inner_pad = '    ' * (indent + 1)
+        lines = [f'{pad}if ({expr} != NULL) {{']
+        self.scope_push()
+        self.scope_set(s.binding, ast.TypePointer(inner=ast.TypeName(name='auto')))
         lines.append(f'{inner_pad}__typeof__({expr}) {s.binding} = {expr};')
         for stmt in s.then.stmts:
             lines.append(self.gen_stmt(stmt, indent + 1))
+        for d in self._emit_defers_for_scope(-1, pad, indent + 1):
+            lines.append(d)
+        self.scope_pop()
         lines.append(f'{pad}}}')
         if s.else_branch:
             lines.append(f'{pad}else {{')
+            self.scope_push()
             for stmt in s.else_branch.stmts:
                 lines.append(self.gen_stmt(stmt, indent + 1))
+            for d in self._emit_defers_for_scope(-1, pad, indent + 1):
+                lines.append(d)
+            self.scope_pop()
             lines.append(f'{pad}}}')
         return '\n'.join(l for l in lines if l is not None)
 
     def gen_loop(self, s: ast.LoopStmt, pad: str, indent: int) -> str:
         lines = [f'{pad}while (true) {{']
+        self.scope_push()
         for stmt in s.body.stmts:
             lines.append(self.gen_stmt(stmt, indent + 1))
+        for d in self._emit_defers_for_scope(-1, pad, indent + 1):
+            lines.append(d)
+        self.scope_pop()
         lines.append(f'{pad}}}')
         return '\n'.join(l for l in lines if l is not None)
 
     def gen_while(self, s: ast.WhileStmt, pad: str, indent: int) -> str:
         cond = self.gen_expr(s.condition)
         lines = [f'{pad}while ({cond}) {{']
+        self.scope_push()
         for stmt in s.body.stmts:
             lines.append(self.gen_stmt(stmt, indent + 1))
+        for d in self._emit_defers_for_scope(-1, pad, indent + 1):
+            lines.append(d)
+        self.scope_pop()
         lines.append(f'{pad}}}')
         return '\n'.join(l for l in lines if l is not None)
 
@@ -867,18 +1210,20 @@ class Codegen:
             else:
                 lines.append(f'{pad}for (int {s.binding} = {start}; {s.binding} < {end}; {s.binding}++) {{')
         else:
-            # for item in array  →  index-based loop using sizeof
-            # Works correctly for [T; N] fixed arrays and struct fields.
-            # For dynamic slices (T*), the programmer must use a range loop with explicit length.
             coll = self.gen_expr(iterable)
-            # Register the binding variable in scope (type inferred from array element)
+            coll_type = self._expr_type(iterable)
             self.scope_set(s.binding, ast.TypeName(name='auto'))
-            if s.index:
-                lines.append(f'{pad}for (int {s.index} = 0; {s.index} < (int)(sizeof({coll})/sizeof(({coll})[0])); {s.index}++) {{')
-                lines.append(f'{inner_pad}__typeof__(({coll})[0]) {s.binding} = ({coll})[{s.index}];')
+
+            if isinstance(coll_type, ast.TypeSlice):
+                # Fat slice: iterate via .data and .len
+                idx = s.index if s.index else f'_i_{s.binding}'
+                lines.append(f'{pad}for (int {idx} = 0; {idx} < ({coll}).len; {idx}++) {{')
+                lines.append(f'{inner_pad}__typeof__(({coll}).data[0]) {s.binding} = ({coll}).data[{idx}];')
             else:
-                lines.append(f'{pad}for (int _i_{s.binding} = 0; _i_{s.binding} < (int)(sizeof({coll})/sizeof(({coll})[0])); _i_{s.binding}++) {{')
-                lines.append(f'{inner_pad}__typeof__(({coll})[0]) {s.binding} = ({coll})[_i_{s.binding}];')
+                # Fixed-size C array ([N]T): iterate using sizeof/sizeof
+                idx = s.index if s.index else f'_i_{s.binding}'
+                lines.append(f'{pad}for (int {idx} = 0; {idx} < (int)(sizeof({coll})/sizeof(({coll})[0])); {idx}++) {{')
+                lines.append(f'{inner_pad}__typeof__(({coll})[0]) {s.binding} = ({coll})[{idx}];')
 
         self.scope_push()
         for stmt in s.body.stmts:
@@ -916,10 +1261,13 @@ class Codegen:
                 else:
                     lines.append(f'{inner_pad}case {pat.name}:')
             elif isinstance(pat, ast.DotAccess):
-                # EnumName.variant explicit form
+                # EnumName.variant or VariantName.Case explicit form
                 variant = pat.field
                 obj_name = self.gen_expr(pat.obj)
-                lines.append(f'{inner_pad}case {obj_name}_{variant}:')
+                if obj_name in self.variant_types:
+                    lines.append(f'{inner_pad}case {obj_name}_tag_{variant}:')
+                else:
+                    lines.append(f'{inner_pad}case {obj_name}_{variant}:')
             elif isinstance(pat, ast.IntLit):
                 lines.append(f'{inner_pad}case {pat.value}:')
             elif isinstance(pat, ast.BoolLit):
@@ -930,6 +1278,13 @@ class Codegen:
             # Wrap body in {} so variable declarations are always valid in C
             lines.append(f'{inner_pad}{{')
             self.scope_push()
+            # Emit variant binding if pattern has one: Type.Case(binding)
+            if isinstance(pat, ast.DotAccess) and hasattr(pat, '_binding') and pat._binding:
+                obj_name = self.gen_expr(pat.obj)
+                if obj_name in self.variant_types:
+                    field_name = pat.field.lower()
+                    lines.append(f'{inner2_pad}__auto_type {pat._binding} = {expr}.data.{field_name};')
+                    self.scope_set(pat._binding, ast.TypeName(name='auto'))
             if isinstance(arm.body, ast.Block):
                 for stmt in arm.body.stmts:
                     lines.append(self.gen_stmt(stmt, indent + 2))

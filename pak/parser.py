@@ -65,6 +65,11 @@ class Parser:
     def parse(self) -> ast.Program:
         decls = []
         while not self.check(TT.EOF):
+            # Skip optional semicolons between top-level declarations
+            while self.match(TT.SEMICOLON):
+                pass
+            if self.check(TT.EOF):
+                break
             d = self.parse_top_level()
             if d is not None:
                 decls.append(d)
@@ -322,6 +327,11 @@ class Parser:
         self.expect(TT.LBRACE)
         stmts = []
         while not self.check(TT.RBRACE) and not self.check(TT.EOF):
+            # Skip optional semicolons between statements
+            while self.match(TT.SEMICOLON):
+                pass
+            if self.check(TT.RBRACE) or self.check(TT.EOF):
+                break
             s = self.parse_stmt()
             if s is not None:
                 stmts.append(s)
@@ -386,6 +396,7 @@ class Parser:
     def parse_let(self, annotations=None) -> ast.LetDecl:
         line, col = self.loc()
         self.expect(TT.LET)
+        mutable = self.match(TT.MUT)
         name = self.expect(TT.IDENT).value
         typ = None
         if self.match(TT.COLON):
@@ -393,7 +404,7 @@ class Parser:
         val = None
         if self.match(TT.EQ):
             val = self.parse_expr()
-        return ast.LetDecl(name=name, type=typ, value=val, annotations=annotations or [], line=line, col=col)
+        return ast.LetDecl(name=name, type=typ, value=val, mutable=mutable, annotations=annotations or [], line=line, col=col)
 
     def parse_static(self, annotations=None) -> ast.StaticDecl:
         line, col = self.loc()
@@ -495,12 +506,23 @@ class Parser:
             return ast.StringLit(value=self.advance().value, line=line, col=col)
         elif self.check(TT.IDENT):
             name = self.advance().value
-            # Could be EnumName.variant
+            # Could be EnumName.variant or VariantName.Case(binding)
             if self.check(TT.DOT):
                 self.advance()
                 variant = self.expect(TT.IDENT).value
-                return ast.DotAccess(obj=ast.Ident(name=name, line=line, col=col),
-                                     field=variant, line=line, col=col)
+                # Optional destructure binding: Type.Case(binding)
+                binding = None
+                if self.check(TT.LPAREN):
+                    self.advance()
+                    if not self.check(TT.RPAREN):
+                        binding = self.expect(TT.IDENT).value
+                    self.expect(TT.RPAREN)
+                pat = ast.DotAccess(obj=ast.Ident(name=name, line=line, col=col),
+                                    field=variant, line=line, col=col)
+                if binding:
+                    # Attach the binding as a named arg hack — codegen looks for it
+                    pat._binding = binding
+                return pat
             return ast.Ident(name=name, line=line, col=col)
         elif self.check(TT.TRUE):
             self.advance()
@@ -687,7 +709,11 @@ class Parser:
                 self.advance()
                 idx = self.parse_expr()
                 # Check for slice: expr[start..end]
-                if self.check(TT.DOTDOT):
+                # parse_primary may have consumed the .. into a RangeExpr already
+                if isinstance(idx, ast.RangeExpr):
+                    self.expect(TT.RBRACKET)
+                    expr = ast.SliceExpr(obj=expr, start=idx.start, end=idx.end, line=line, col=col)
+                elif self.check(TT.DOTDOT):
                     self.advance()
                     end = None
                     if not self.check(TT.RBRACKET):
@@ -823,17 +849,20 @@ class Parser:
         raise ParseError(f'Unexpected token in expression', tok)
 
     def _is_struct_literal_context(self) -> bool:
-        """Heuristic: look ahead to see if { ... } looks like a struct literal."""
-        # Look for pattern: { ident: ...
+        """Heuristic: look ahead to see if { ... } looks like a struct literal.
+        We only treat it as a struct literal when it has at least one field (ident: val).
+        Empty { } is treated as a block to avoid ambiguity with if/while/for bodies.
+        """
         i = self.pos
         if i >= len(self.tokens) or self.tokens[i].type != TT.LBRACE:
             return False
         i += 1
         if i >= len(self.tokens):
             return False
-        # Empty struct literal
+        # Empty braces — treat as a block (not a struct literal) to avoid
+        # misparse in `if x { }`, `while cond { }` etc.
         if self.tokens[i].type == TT.RBRACE:
-            return True
+            return False
         # If next after { is an ident followed by :, it's a struct literal
         if self.tokens[i].type == TT.IDENT and i + 1 < len(self.tokens) and self.tokens[i+1].type == TT.COLON:
             return True
