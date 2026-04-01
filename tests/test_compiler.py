@@ -1167,3 +1167,460 @@ class TestModuleAPI:
     def test_t3d_quat_slerp(self):
         c = codegen('use t3d.math\nentry { t3d.quat_slerp(q1, q2, q3, 0.5) }')
         assert 't3d_quat_slerp' in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# volatile
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestVolatile:
+
+    def test_lex_volatile_keyword(self):
+        assert TT.VOLATILE in token_types('volatile')
+
+    def test_parse_volatile_type(self):
+        prog = parse('fn f(x: volatile i32) -> void { }')
+        fn = prog.decls[0]
+        from pak import ast as a
+        assert isinstance(fn.params[0].type, a.TypeVolatile)
+
+    def test_parse_pointer_to_volatile(self):
+        prog = parse('fn f(x: *volatile u32) -> void { }')
+        fn = prog.decls[0]
+        t = fn.params[0].type
+        from pak import ast as a
+        assert isinstance(t, a.TypeVolatile)
+        assert isinstance(t.inner, a.TypePointer)
+
+    def test_codegen_volatile_param(self):
+        c = codegen('fn f(x: volatile i32) -> void { }')
+        assert 'volatile int32_t x' in c
+
+    def test_codegen_volatile_pointer(self):
+        c = codegen('fn f(x: *volatile u32) -> void { }')
+        assert 'volatile' in c
+
+    def test_codegen_volatile_static(self):
+        c = codegen('static reg: volatile u32 = undefined')
+        assert 'volatile uint32_t reg' in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# const declarations
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestConstDecl:
+
+    def test_lex_const_keyword(self):
+        assert TT.CONST in token_types('const')
+
+    def test_parse_const_int(self):
+        prog = parse('const MAX_SCORE: i32 = 9999')
+        from pak import ast as a
+        cd = prog.decls[0]
+        assert isinstance(cd, a.ConstDecl)
+        assert cd.name == 'MAX_SCORE'
+
+    def test_parse_const_no_type(self):
+        prog = parse('const N = 64')
+        from pak import ast as a
+        cd = prog.decls[0]
+        assert isinstance(cd, a.ConstDecl)
+        assert cd.type is None
+
+    def test_codegen_const_int_uses_enum_trick(self):
+        c = codegen('const MAX: i32 = 100')
+        assert 'enum' in c
+        assert 'MAX' in c
+        assert '100' in c
+
+    def test_codegen_const_f32(self):
+        c = codegen('const PI: f32 = 3.14')
+        assert 'PI' in c
+        assert '3.14' in c
+
+    def test_const_usable_as_array_size(self):
+        src = textwrap.dedent('''
+            const BUF_SIZE: i32 = 256
+            static buf: [BUF_SIZE]byte = undefined
+        ''')
+        c = codegen(src)
+        assert 'BUF_SIZE' in c
+        assert 'buf' in c
+
+    def test_typecheck_const_known_name(self):
+        src = textwrap.dedent('''
+            const LIMIT: i32 = 10
+            fn f() -> void {
+                let x: i32 = LIMIT
+            }
+        ''')
+        errors = check(src)
+        assert not errors
+
+    def test_const_in_stmt_position(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                const LOCAL: i32 = 5
+                let x: i32 = LOCAL
+            }
+        ''')
+        errors = check(src)
+        assert not errors
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# extern const
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestExternConst:
+
+    def test_parse_extern_const(self):
+        prog = parse('extern const SCREEN_W: i32')
+        from pak import ast as a
+        ec = prog.decls[0]
+        assert isinstance(ec, a.ExternConst)
+        assert ec.name == 'SCREEN_W'
+
+    def test_codegen_extern_const_is_comment(self):
+        c = codegen('extern const VI_WIDTH: u32')
+        assert 'VI_WIDTH' in c
+
+    def test_typecheck_extern_const_known(self):
+        src = textwrap.dedent('''
+            extern const SCREEN_W: i32
+            fn f() -> void {
+                let w: i32 = SCREEN_W
+            }
+        ''')
+        errors = check(src)
+        assert not errors
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# bit fields
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestBitFields:
+
+    def test_parse_struct_bit_field(self):
+        src = textwrap.dedent('''
+            struct Flags {
+                ready: u32 : 1
+                mode: u32 : 3
+                value: u32 : 28
+            }
+        ''')
+        prog = parse(src)
+        from pak import ast as a
+        s = prog.decls[0]
+        assert isinstance(s, a.StructDecl)
+        assert s.fields[0].bit_width == 1
+        assert s.fields[1].bit_width == 3
+        assert s.fields[2].bit_width == 28
+
+    def test_codegen_bit_field_syntax(self):
+        src = textwrap.dedent('''
+            struct Reg {
+                enable: u32 : 1
+                mode: u32 : 4
+            }
+        ''')
+        c = codegen(src)
+        assert 'enable : 1' in c
+        assert 'mode : 4' in c
+
+    def test_struct_normal_and_bit_fields_mixed(self):
+        src = textwrap.dedent('''
+            struct Mixed {
+                id: i32
+                flags: u8 : 4
+                pad: u8 : 4
+            }
+        ''')
+        c = codegen(src)
+        assert 'int32_t id' in c
+        assert 'flags : 4' in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# asm statement and expression
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAsm:
+
+    def test_lex_asm_keyword(self):
+        assert TT.ASM in token_types('asm')
+
+    def test_parse_asm_stmt(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                asm { "nop" }
+            }
+        ''')
+        prog = parse(src)
+        fn = prog.decls[0]
+        from pak import ast as a
+        stmt = fn.body.stmts[0]
+        assert isinstance(stmt, a.AsmStmt)
+        assert stmt.lines == ['nop']
+
+    def test_parse_asm_stmt_multiple_lines(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                asm { "nop" "nop" "nop" }
+            }
+        ''')
+        prog = parse(src)
+        fn = prog.decls[0]
+        stmt = fn.body.stmts[0]
+        assert len(stmt.lines) == 3
+
+    def test_codegen_asm_stmt(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                asm { "nop" }
+            }
+        ''')
+        c = codegen(src)
+        assert '__asm__' in c
+        assert '__volatile__' in c
+        assert 'nop' in c
+
+    def test_codegen_asm_stmt_multiple(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                asm { "nop" "nop" }
+            }
+        ''')
+        c = codegen(src)
+        assert c.count('"nop') == 2
+
+    def test_parse_asm_expr_simple(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let x: u32 = asm("mfc0 %0, $9" : "=r"(x) : : "memory")
+            }
+        ''')
+        prog = parse(src)
+        fn = prog.decls[0]
+        from pak import ast as a
+        let_stmt = fn.body.stmts[0]
+        assert isinstance(let_stmt.value, a.AsmExpr)
+
+    def test_codegen_asm_expr(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let x: u32 = asm("mfc0 %0, $9" : "=r"(x) : : "memory")
+            }
+        ''')
+        c = codegen(src)
+        assert '__asm__' in c
+        assert 'mfc0' in c
+
+    def test_typecheck_asm_stmt_no_errors(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                asm { "nop" }
+            }
+        ''')
+        errors = check(src)
+        assert not errors
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# closures / fn literals
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestClosures:
+
+    def test_parse_closure_expr(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let cb: *void = fn(x: i32) -> i32 { return x }
+            }
+        ''')
+        prog = parse(src)
+        fn = prog.decls[0]
+        from pak import ast as a
+        let_stmt = fn.body.stmts[0]
+        assert isinstance(let_stmt.value, a.Closure)
+
+    def test_parse_closure_no_ret(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let cb: *void = fn(x: i32) { }
+            }
+        ''')
+        prog = parse(src)
+        fn = prog.decls[0]
+        let_stmt = fn.body.stmts[0]
+        from pak import ast as a
+        assert isinstance(let_stmt.value, a.Closure)
+        assert let_stmt.value.ret_type is None
+
+    def test_codegen_closure_emits_static_fn(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let cb: *void = fn(x: i32) -> i32 { return x }
+            }
+        ''')
+        c = codegen(src)
+        assert '_pak_closure_0' in c
+        assert 'static int32_t _pak_closure_0' in c
+
+    def test_codegen_closure_as_callback(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let cb: *void = fn(a: f32, b: f32) -> f32 { return a + b }
+            }
+        ''')
+        c = codegen(src)
+        assert 'static float _pak_closure_0(float a, float b)' in c
+
+    def test_codegen_multiple_closures(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let c1: *void = fn(x: i32) -> i32 { return x }
+                let c2: *void = fn(y: i32) -> i32 { return y }
+            }
+        ''')
+        c = codegen(src)
+        assert '_pak_closure_0' in c
+        assert '_pak_closure_1' in c
+
+    def test_typecheck_closure_params_in_scope(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let cb: *void = fn(x: i32) -> i32 { return x }
+            }
+        ''')
+        errors = check(src)
+        assert not errors
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# offsetof
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestOffsetOf:
+
+    def test_lex_offsetof_keyword(self):
+        assert TT.OFFSETOF in token_types('offsetof')
+
+    def test_parse_offsetof(self):
+        src = textwrap.dedent('''
+            struct Vec3 { x: f32  y: f32  z: f32 }
+            fn f() -> void {
+                let off: i32 = offsetof(Vec3, z)
+            }
+        ''')
+        prog = parse(src)
+        fn = prog.decls[1]
+        from pak import ast as a
+        let_stmt = fn.body.stmts[0]
+        assert isinstance(let_stmt.value, a.OffsetOf)
+        assert let_stmt.value.type_name == 'Vec3'
+        assert let_stmt.value.field == 'z'
+
+    def test_codegen_offsetof(self):
+        src = textwrap.dedent('''
+            struct Vec3 { x: f32  y: f32  z: f32 }
+            fn f() -> void {
+                let off: i32 = offsetof(Vec3, z)
+            }
+        ''')
+        c = codegen(src)
+        assert 'offsetof(Vec3, z)' in c
+
+    def test_typecheck_offsetof_no_errors(self):
+        src = textwrap.dedent('''
+            struct Vec3 { x: f32  y: f32  z: f32 }
+            fn f() -> void {
+                let off: i32 = offsetof(Vec3, z)
+            }
+        ''')
+        errors = check(src)
+        assert not errors
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# impl blocks and methods
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestImplBlocks:
+
+    def test_typecheck_impl_methods_collected(self):
+        src = textwrap.dedent('''
+            struct Player { x: f32  y: f32 }
+            impl Player {
+                fn move_right(self: *Player, speed: f32) -> void {
+                    self.x = self.x + speed
+                }
+            }
+        ''')
+        errors = check(src)
+        assert not errors
+
+    def test_typecheck_impl_method_body(self):
+        src = textwrap.dedent('''
+            struct Obj { val: i32 }
+            impl Obj {
+                fn get(self: *Obj) -> i32 {
+                    return self.val
+                }
+            }
+        ''')
+        errors = check(src)
+        assert not errors
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ok / err expressions
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestOkErr:
+
+    def test_typecheck_ok_expr(self):
+        src = textwrap.dedent('''
+            enum Err: u8 { bad }
+            fn f() -> Result(i32, Err) {
+                return ok(1)
+            }
+        ''')
+        errors = check(src)
+        assert not errors
+
+    def test_typecheck_err_expr(self):
+        src = textwrap.dedent('''
+            enum Err: u8 { bad }
+            fn f() -> Result(i32, Err) {
+                return err(Err.bad)
+            }
+        ''')
+        errors = check(src)
+        assert not errors
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# features.pak end-to-end
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFeaturesPak:
+
+    def test_features_pak_compiles(self):
+        """examples/features.pak should parse and codegen without errors."""
+        import pathlib
+        src = pathlib.Path('examples/features.pak').read_text()
+        c = codegen(src)
+        assert 'Player' in c
+        assert 'update_player' in c
+
+    def test_features_pak_no_type_errors(self):
+        """examples/features.pak should produce no type errors."""
+        import pathlib
+        src = pathlib.Path('examples/features.pak').read_text()
+        errors = check(src)
+        # Filter out module-related false positives from use declarations
+        real_errors = [e for e in errors if e.code not in ('E010',)]
+        assert real_errors == []

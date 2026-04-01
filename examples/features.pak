@@ -37,6 +37,8 @@ struct DMABuffer {
 struct Player {
     x: f32
     y: f32
+    vel_x: f32
+    vel_z: f32
     health: i32
     speed: f32
     facing: Direction
@@ -46,8 +48,8 @@ struct Player {
 -- Function with annotations
 @hot
 fn update_player(p: *Player, dt: f32) {
-    p.vel_x *= 0.9
-    p.vel_z *= 0.9
+    p.vel_x = p.vel_x * 0.9
+    p.vel_z = p.vel_z * 0.9
 }
 
 fn clamp(val: f32, min: f32, max: f32) -> f32 {
@@ -64,7 +66,7 @@ enum LoadError: u8 {
 
 fn load_level(path: *c_char) -> Result(i32, LoadError) {
     -- Simplified example
-    return 0
+    return ok(1)
 }
 
 -- Arena example
@@ -72,7 +74,7 @@ static frame_buffer: [16384]byte = undefined
 
 entry {
     let game_state = GameState.title
-    let player = Player { x: 160, y: 120, health: 3, speed: 2.5, facing: Direction.right, grounded: true }
+    let player = Player { x: 160, y: 120, vel_x: 0.0, vel_z: 0.0, health: 3, speed: 2.5, facing: Direction.right, grounded: true }
 
     -- Defer example
     defer {

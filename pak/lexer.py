@@ -55,6 +55,10 @@ class TT(Enum):
     ERR = auto()
     SIZEOF = auto()
     ELIF = auto()
+    VOLATILE = auto()
+    CONST = auto()
+    ASM = auto()
+    OFFSETOF = auto()
 
     # Annotations
     ANNOTATION = auto()  # @something
@@ -147,6 +151,10 @@ KEYWORDS = {
     'err': TT.ERR,
     'sizeof': TT.SIZEOF,
     'elif': TT.ELIF,
+    'volatile': TT.VOLATILE,
+    'const': TT.CONST,
+    'asm': TT.ASM,
+    'offsetof': TT.OFFSETOF,
     '_': TT.UNDERSCORE,
 }
 

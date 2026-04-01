@@ -174,9 +174,25 @@ $(BUILD_DIR)/%.t3dm: %.gltf
 
 
 def _pakfs_rule(project_name: str, root: Path) -> str:
-    """Return a Makefile rule that runs `pak pack` to build the PakFS archive."""
+    """Return a Makefile rule that packs converted assets from BUILD_DIR."""
+    # Compute converted asset lists using make's $(patsubst ...) so the rule
+    # is correct even when source assets are added or removed after generation.
     return f'''\
-# ── PakFS archive ──────────────────────────────────────────────────────────
-filesystem/{project_name}.pakfs: $(shell find assets -type f 2>/dev/null)
+# ── PakFS archive (packed from converted assets in BUILD_DIR) ──────────────
+_RAW_ASSETS      := $(shell find assets -type f 2>/dev/null)
+_SPRITE_SRCS     := $(filter %.png,$(_RAW_ASSETS))
+_WAV_SRCS        := $(filter %.wav,$(_RAW_ASSETS))
+_XM_SRCS         := $(filter %.xm,$(_RAW_ASSETS))
+_YM_SRCS         := $(filter %.ym,$(_RAW_ASSETS))
+_T3DM_SRCS       := $(filter %.gltf %.glb,$(_RAW_ASSETS))
+_SPRITE_OUTS     := $(patsubst %.png,$(BUILD_DIR)/%.sprite,$(_SPRITE_SRCS))
+_WAV_OUTS        := $(patsubst %.wav,$(BUILD_DIR)/%.wav64,$(_WAV_SRCS))
+_XM_OUTS         := $(patsubst %.xm,$(BUILD_DIR)/%.xm64,$(_XM_SRCS))
+_YM_OUTS         := $(patsubst %.ym,$(BUILD_DIR)/%.ym64,$(_YM_SRCS))
+_T3DM_OUTS       := $(patsubst %.gltf,$(BUILD_DIR)/%.t3dm,$(filter %.gltf,$(_T3DM_SRCS))) \\
+                    $(patsubst %.glb,$(BUILD_DIR)/%.t3dm,$(filter %.glb,$(_T3DM_SRCS)))
+_CONVERTED_ASSETS := $(_SPRITE_OUTS) $(_WAV_OUTS) $(_XM_OUTS) $(_YM_OUTS) $(_T3DM_OUTS)
+
+filesystem/{project_name}.pakfs: $(_CONVERTED_ASSETS)
 \t@mkdir -p filesystem
-\tpak pack --output $@ assets/'''
+\tpak pack --output $@ --base $(BUILD_DIR) $(_CONVERTED_ASSETS)'''

@@ -67,6 +67,12 @@ class TypeEnv:
                     self.variant_cases[c.name] = decl.name
             elif isinstance(decl, ast.FnDecl):
                 self.fns[decl.name] = decl
+            elif isinstance(decl, ast.ImplBlock):
+                for m in decl.methods:
+                    prefixed = f'{decl.type_name}_{m.name}'
+                    self.fns[prefixed] = m
+            elif isinstance(decl, (ast.ConstDecl, ast.ExternConst)):
+                pass  # names registered in _check_top
 
     def struct_fields(self, name: str) -> Optional[Dict[str, Any]]:
         """Return {field_name: type} for a struct, or None."""
@@ -146,16 +152,27 @@ def fixpoint_shift(typ) -> int:
 # ── Type checker ──────────────────────────────────────────────────────────────
 
 # Module names that are not variables (don't trigger "unknown variable" errors)
+# Matches every module key used in codegen.MODULE_API
 MODULE_NAMESPACES = {
-    'display', 'controller', 'rdpq', 'sprite', 'audio', 'timer',
-    'dma', 'cache', 'debug', 't3d', 'n64', 'math', 'mem', 'eeprom',
+    # n64 subsystems
+    'display', 'controller', 'joypad', 'rdpq', 'rdpq_tex', 'rdpq_font', 'rdpq_mode',
+    'sprite', 'surface', 'audio', 'mixer', 'xm64', 'wav64', 'timer', 'dma', 'cache',
+    'debug', 'math', 'mem', 'vi', 'rsp', 'eeprom', 'backup', 'sram', 'flashram',
+    'rtc', 'cpak', 'tpak', 'rumble', 'mouse', 'vru', 'disk', 'system', 'exception',
+    # Tiny3D
+    't3d',
+    # Pak runtime helpers
+    'str', 'arena',
+    # Generic namespace prefix
+    'n64',
 }
 
 # C types that are always available (from includes)
 BUILTIN_TYPES = {
     'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64',
     'f32', 'f64', 'bool', 'byte', 'fix16.16', 'fix10.5', 'fix1.15',
-    'Vec2', 'Vec3', 'Vec4', 'Mat4', 'Str', 'Arena', 'void', 'c_char',
+    'Vec2', 'Vec3', 'Vec4', 'Mat4', 'Str', 'CStr', 'PakStr', 'PakArena',
+    'Arena', 'void', 'c_char', 'T3DVec2', 'T3DVec3', 'T3DVec4', 'T3DMat4',
 }
 
 # Annotations that imply 16-byte alignment
@@ -204,6 +221,15 @@ class TypeChecker:
             self._check_static(decl)
         elif isinstance(decl, ast.LetDecl):
             self._check_let(decl)
+        elif isinstance(decl, ast.ImplBlock):
+            for m in decl.methods:
+                self._check_fn(m)
+        elif isinstance(decl, ast.ConstDecl):
+            if decl.value:
+                self._check_expr(decl.value)
+            self.scope.declare(decl.name, decl.type or ast.TypeName(name='auto'))
+        elif isinstance(decl, ast.ExternConst):
+            self.scope.declare(decl.name, decl.type)
 
     def _check_fn(self, fn: ast.FnDecl):
         if not fn.body:
@@ -276,6 +302,12 @@ class TypeChecker:
             pass
         elif isinstance(stmt, ast.Block):
             self._check_block(stmt)
+        elif isinstance(stmt, ast.ConstDecl):
+            if stmt.value:
+                self._check_expr(stmt.value)
+            self.scope.declare(stmt.name, stmt.type or ast.TypeName(name='auto'))
+        elif isinstance(stmt, ast.AsmStmt):
+            pass  # raw asm — nothing to check
 
     def _check_let(self, s: ast.LetDecl):
         if s.value:
@@ -399,6 +431,31 @@ class TypeChecker:
             self._check_expr(expr.start)
             if expr.end:
                 self._check_expr(expr.end)
+
+        elif isinstance(expr, ast.OkExpr):
+            self._check_expr(expr.value)
+
+        elif isinstance(expr, ast.ErrExpr):
+            self._check_expr(expr.value)
+
+        elif isinstance(expr, ast.SizeOf):
+            pass  # no sub-expressions
+
+        elif isinstance(expr, ast.OffsetOf):
+            pass  # no sub-expressions to check
+
+        elif isinstance(expr, ast.AsmExpr):
+            for _, e in expr.outputs:
+                self._check_expr(e)
+            for _, e in expr.inputs:
+                self._check_expr(e)
+
+        elif isinstance(expr, ast.Closure):
+            self.scope.push()
+            for p in expr.params:
+                self.scope.declare(p.name, p.type)
+            self._check_block_stmts(expr.body.stmts)
+            self.scope.pop()
 
     # ── Field access checking ─────────────────────────────────────────────────
 

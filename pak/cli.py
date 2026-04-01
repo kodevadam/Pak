@@ -108,7 +108,8 @@ def cmd_build(args):
     optimization = build_cfg.get('optimization', 'debug')
 
     verbose = getattr(args, 'verbose', False)
-    strict = getattr(args, 'strict', False)
+    # Strict by default — pass --permissive to continue despite type errors
+    permissive = getattr(args, 'permissive', False)
 
     print(f'Building {project_name}...')
 
@@ -138,10 +139,11 @@ def cmd_build(args):
                 print(str(err), file=sys.stderr)
             total_errors += len(errors)
     if total_errors > 0:
-        print(f'\n{total_errors} type error(s). Fix them before building.', file=sys.stderr)
-        if strict:
+        print(f'\n{total_errors} type error(s).', file=sys.stderr)
+        if not permissive:
+            print('  Aborting. Use --permissive to build anyway.', file=sys.stderr)
             sys.exit(1)
-        print('  (continuing build with --no-strict)', file=sys.stderr)
+        print('  (continuing with --permissive)', file=sys.stderr)
 
     # ── 3. Generate headers for modules ──────────────────────────────────────
     # Map: module_path → header_filename (e.g. 'game.player' → 'game_player.h')
@@ -185,13 +187,31 @@ def cmd_build(args):
         print(f'  Runtime -> runtime/')
 
     # ── 6. Pack assets into PakFS archive ────────────────────────────────────
+    # We pack the BUILD_DIR converted outputs, not raw source assets.
+    # Conversion happens via Makefile rules at `make` time; here we only pack
+    # what already exists in build/ (from a previous make or pre-converted files).
+    # The Makefile pakfs rule will redo this after conversion.
     asset_dirs = config.get('assets', {})
     packable = []
+    _CONVERT_EXT = {'.png': '.sprite', '.wav': '.wav64', '.xm': '.xm64',
+                    '.ym': '.ym64', '.gltf': '.t3dm', '.glb': '.t3dm'}
     for kind, rel_dir in asset_dirs.items():
         asset_path = root / rel_dir
         if asset_path.is_dir():
             for f in sorted(asset_path.rglob('*')):
-                if f.is_file():
+                if not f.is_file():
+                    continue
+                converted_ext = _CONVERT_EXT.get(f.suffix.lower())
+                if converted_ext:
+                    # Look for converted file in build dir
+                    rel = f.relative_to(root)
+                    converted = build_dir / rel.with_suffix(converted_ext)
+                    if converted.exists():
+                        arch_name = str(rel.with_suffix(converted_ext)).replace(os.sep, '/')
+                        packable.append((arch_name, converted.read_bytes()))
+                    # else: skip — make has not converted yet
+                else:
+                    # Non-convertible asset (e.g. .pak data files): pack as-is
                     name = str(f.relative_to(root)).replace(os.sep, '/')
                     packable.append((name, f.read_bytes()))
 
@@ -314,15 +334,48 @@ def cmd_run(args):
 
 
 def cmd_pack(args):
-    """Pack a directory of assets into a PakFS archive."""
-    from .pakfs import pack_directory
-    src = Path(args.source)
+    """Pack converted assets into a PakFS archive.
+
+    Usage:
+      pak pack --output game.pakfs                    # auto-discover build/ assets
+      pak pack build/assets/*.sprite --output g.pakfs  # explicit list
+      pak pack file1 file2 --base build/ --output g.pakfs  # strip base path
+    """
+    from .pakfs import pack
     out = Path(args.output)
-    if not src.is_dir():
-        print(f'error: {src} is not a directory', file=sys.stderr)
-        sys.exit(1)
-    count = pack_directory(src, out)
-    print(f'Packed {count} file(s) into {out}')
+    base = Path(args.base) if getattr(args, 'base', None) else None
+    files_arg = getattr(args, 'files', [])
+
+    packable = []
+    if files_arg:
+        for f_str in files_arg:
+            f = Path(f_str)
+            if f.is_file():
+                if base:
+                    try:
+                        arch_name = str(f.relative_to(base)).replace(os.sep, '/')
+                    except ValueError:
+                        arch_name = f.name
+                else:
+                    arch_name = f.name
+                packable.append((arch_name, f.read_bytes()))
+    else:
+        # Auto-discover converted assets in build/
+        build_dir = Path('build')
+        if build_dir.is_dir():
+            for f in sorted(build_dir.rglob('*')):
+                if f.is_file() and f.suffix in ('.sprite', '.wav64', '.xm64',
+                                                 '.ym64', '.t3dm'):
+                    arch_name = str(f.relative_to(build_dir)).replace(os.sep, '/')
+                    packable.append((arch_name, f.read_bytes()))
+
+    if not packable:
+        print('warning: no assets found to pack', file=sys.stderr)
+        return
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(pack(packable))
+    print(f'Packed {len(packable)} file(s) into {out}')
 
 
 def cmd_init(args):
@@ -460,8 +513,8 @@ def main():
     # build
     p_build = sub.add_parser('build', help='Compile .pak to C, pack assets, generate Makefile')
     p_build.add_argument('-v', '--verbose', action='store_true')
-    p_build.add_argument('--strict', action='store_true',
-                         help='Fail on type errors (default: warn and continue)')
+    p_build.add_argument('--permissive', action='store_true',
+                         help='Continue building even when type errors are present')
     p_build.set_defaults(func=cmd_build)
 
     # check
@@ -477,7 +530,7 @@ def main():
     # run
     p_run = sub.add_parser('run', help='Build then `make run` (launches in ares)')
     p_run.add_argument('-v', '--verbose', action='store_true')
-    p_run.add_argument('--strict', action='store_true')
+    p_run.add_argument('--permissive', action='store_true')
     p_run.set_defaults(func=cmd_run)
 
     # init
@@ -490,9 +543,10 @@ def main():
     p_clean.set_defaults(func=cmd_clean)
 
     # pack
-    p_pack = sub.add_parser('pack', help='Pack an asset directory into a PakFS archive')
-    p_pack.add_argument('source', help='Source directory')
+    p_pack = sub.add_parser('pack', help='Pack converted assets into a PakFS archive')
+    p_pack.add_argument('files', nargs='*', help='Specific files to pack (or auto-discover)')
     p_pack.add_argument('--output', '-o', required=True, help='Output .pakfs file')
+    p_pack.add_argument('--base', help='Base directory to strip from archive paths')
     p_pack.set_defaults(func=cmd_pack)
 
     # runtime-dir (internal, used by generated Makefile)

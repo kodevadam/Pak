@@ -662,6 +662,10 @@ class Codegen:
         self._generic_structs: dict = {}  # name → StructDecl
         # Monomorphization cache: (fn_name, tuple(type_args)) → specialized C name
         self._mono_cache: dict = {}
+        # Closure registry: list of (c_name, Closure) — emitted as static fns
+        self._closures: List[tuple] = []
+        # Const values visible to all scopes (name → expr string)
+        self.const_values: dict = {}
 
     # ── Scope helpers ─────────────────────────────────────────────────────────
 
@@ -765,6 +769,12 @@ class Codegen:
     def gen_type(self, t) -> str:
         if t is None:
             return 'void'
+        if isinstance(t, ast.TypeVolatile):
+            inner = self.gen_type(t.inner)
+            # volatile T* vs volatile T — if inner ends with * it's a volatile pointer
+            if inner.endswith(' *') or inner.endswith('*'):
+                return f'volatile {inner}'
+            return f'volatile {inner}'
         if isinstance(t, ast.TypeName):
             # User-defined structs/enums/variants shadow the primitive type table
             if t.name in self.struct_fields or t.name in self.variant_types or t.name in self.enum_variants.values():
@@ -1025,10 +1035,56 @@ class Codegen:
         if isinstance(e, ast.SizeOf):
             operand = e.operand
             if isinstance(operand, (ast.TypeName, ast.TypePointer, ast.TypeArray,
-                                    ast.TypeSlice, ast.TypeResult, ast.TypeGeneric)):
+                                    ast.TypeSlice, ast.TypeResult, ast.TypeGeneric,
+                                    ast.TypeVolatile)):
                 return f'sizeof({self.gen_type(operand)})'
             return f'sizeof({self.gen_expr(operand)})'
+        if isinstance(e, ast.OffsetOf):
+            return f'offsetof({e.type_name}, {e.field})'
+        if isinstance(e, ast.AsmExpr):
+            return self._gen_asm_expr(e)
+        if isinstance(e, ast.Closure):
+            return self._gen_closure(e)
         return '/* unknown expr */'
+
+    def _gen_asm_expr(self, e: ast.AsmExpr) -> str:
+        parts = [f'__asm__ {"__volatile__" if e.volatile else ""}("{e.template}"']
+        if e.outputs or e.inputs or e.clobbers:
+            outs = ', '.join(f'"{c}"({self.gen_expr(x)})' for c, x in e.outputs)
+            ins  = ', '.join(f'"{c}"({self.gen_expr(x)})' for c, x in e.inputs)
+            clob = ', '.join(f'"{c}"' for c in e.clobbers)
+            parts.append(f' : {outs} : {ins}')
+            if clob:
+                parts.append(f' : {clob}')
+        parts.append(')')
+        return ''.join(parts)
+
+    def _gen_closure(self, e: ast.Closure) -> str:
+        """Emit a non-capturing closure as a static function + function pointer.
+        The closure is registered and emitted as a top-level static fn.
+        """
+        name = f'_pak_closure_{len(self._closures)}'
+        self._closures.append((name, e))
+        return name  # use function pointer directly (decays to fn ptr)
+
+    def _emit_closures(self) -> List[str]:
+        """Emit all registered closures as static functions."""
+        lines = []
+        for name, e in self._closures:
+            ret = self.gen_type(e.ret_type) if e.ret_type else 'void'
+            params = ', '.join(f'{self.gen_type(p.type)} {p.name}' for p in e.params)
+            lines.append(f'static {ret} {name}({params or "void"}) {{')
+            self.scope_push()
+            for p in e.params:
+                self.scope_set(p.name, p.type)
+            for stmt in e.body.stmts:
+                s = self.gen_stmt(stmt, indent=1)
+                if s:
+                    lines.append(s)
+            self.scope_pop()
+            lines.append('}')
+            lines.append('')
+        return lines
 
     def gen_program(self, program: ast.Program) -> str:
         # First pass: collect uses, assets, fn names, enum/variant info, methods
@@ -1065,6 +1121,9 @@ class Codegen:
                     self.method_registry[tname] = {}
                 for m in decl.methods:
                     self.method_registry[tname][m.name] = m
+            elif isinstance(decl, ast.ConstDecl):
+                # Pre-evaluate constant value string for use in type expressions
+                self.const_values[decl.name] = self.gen_expr(decl.value)
 
         # Build output
         out_lines = []
@@ -1156,6 +1215,14 @@ class Codegen:
             for typedef_name, c_ok, c_err in self._result_typedefs:
                 out_lines.append(f'typedef struct {{ bool is_ok; union {{ {c_ok} value; {c_err} error; }} data; }} {typedef_name};')
 
+        # Emit closures (non-capturing fn literals) as static functions
+        if self._closures:
+            closure_lines = self._emit_closures()
+            self._closures.clear()
+            out_lines.append('')
+            out_lines.append('/* -- Closures -- */')
+            out_lines.extend(closure_lines)
+
         out_lines.extend(body_lines)
 
         # Emit any monomorphized generic specializations generated during body codegen
@@ -1194,6 +1261,10 @@ class Codegen:
             return self.gen_let_decl_global(decl)
         if isinstance(decl, ast.ImplBlock):
             return self.gen_impl(decl)
+        if isinstance(decl, ast.ConstDecl):
+            return self.gen_const(decl)
+        if isinstance(decl, ast.ExternConst):
+            return self.gen_extern_const(decl)
         return f'/* unhandled decl: {type(decl).__name__} */'
 
     def gen_impl(self, impl: ast.ImplBlock) -> str:
@@ -1201,6 +1272,25 @@ class Codegen:
         for method in impl.methods:
             parts.append(self.gen_fn(method, prefix=impl.type_name))
         return '\n\n'.join(parts)
+
+    def gen_const(self, c: ast.ConstDecl) -> str:
+        val = self.gen_expr(c.value)
+        if c.type:
+            # static const T NAME = val;  — usable in array sizes via enum trick
+            c_type = self.gen_type(c.type)
+            # Use enum for integer constants so they're usable as array sizes in C89/C99
+            if c_type in ('int32_t', 'uint32_t', 'int', 'uint32_t', 'int16_t', 'uint16_t',
+                          'int8_t', 'uint8_t', 'int64_t', 'uint64_t'):
+                return f'enum {{ {c.name} = {val} }};'
+            return f'static const {c_type} {c.name} = {val};'
+        return f'enum {{ {c.name} = {val} }};'
+
+    def gen_extern_const(self, e: ast.ExternConst) -> str:
+        # Declare as extern for type-checking purposes; the actual value
+        # comes from a C header macro.  We emit a static const that re-uses
+        # the macro value so we get the type.
+        c_type = self.gen_type(e.type)
+        return f'/* extern const {c_type} {e.name}; (C macro passthrough) */'
 
     def _infer_type_args(self, fn_decl: ast.FnDecl, call_args: list) -> list:
         """Infer concrete types for a generic function's type params from call site args."""
@@ -1305,8 +1395,12 @@ class Codegen:
         attr_str = ' '.join(attrs)
         lines = [f'typedef struct {{']
         for field in s.fields:
-            decl = self.gen_array_decl(field.name, field.type)
-            lines.append(f'    {decl};')
+            if field.bit_width is not None:
+                c_type = self.gen_type(field.type)
+                lines.append(f'    {c_type} {field.name} : {field.bit_width};')
+            else:
+                decl = self.gen_array_decl(field.name, field.type)
+                lines.append(f'    {decl};')
         suffix = f' {attr_str}' if attr_str else ''
         lines.append(f'}} {s.name}{suffix};')
         return '\n'.join(lines)
@@ -1494,6 +1588,12 @@ class Codegen:
             return self.gen_variant(stmt)
         if isinstance(stmt, ast.Block):
             return self.gen_block_inline(stmt, pad, indent)
+        if isinstance(stmt, ast.AsmStmt):
+            asm_lines = ' '.join(f'"{ln}\\n\\t"' for ln in stmt.lines)
+            vol = '__volatile__' if stmt.volatile else ''
+            return f'{pad}__asm__ {vol}({asm_lines});'
+        if isinstance(stmt, ast.ConstDecl):
+            return self.gen_const(stmt)
         return f'{pad}/* unhandled stmt: {type(stmt).__name__} */'
 
     def gen_let_stmt(self, s: ast.LetDecl, pad: str) -> str:

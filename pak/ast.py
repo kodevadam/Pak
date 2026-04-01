@@ -68,6 +68,13 @@ class TypeFn:
     line: int = 0
     col: int = 0
 
+@dataclass
+class TypeVolatile:
+    """volatile T — volatile-qualified pointer/type."""
+    inner: Any
+    line: int = 0
+    col: int = 0
+
 
 # ── Expressions ──────────────────────────────────────────────────────────────
 
@@ -256,6 +263,34 @@ class ErrExpr:
     line: int = 0
     col: int = 0
 
+@dataclass
+class OffsetOf:
+    """offsetof(Type, field)"""
+    type_name: str
+    field: str
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class Closure:
+    """fn(params) -> ret { body } or fn(params) -> ret = expr — fn literal / lambda"""
+    params: List[Any]      # List[Param]
+    ret_type: Optional[Any]
+    body: Any              # Block or single expr
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class AsmExpr:
+    """asm("template" : outputs : inputs : clobbers) — inline assembly"""
+    template: str
+    outputs: List[Any] = field(default_factory=list)   # list of (constraint, expr)
+    inputs: List[Any] = field(default_factory=list)    # list of (constraint, expr)
+    clobbers: List[str] = field(default_factory=list)
+    volatile: bool = True
+    line: int = 0
+    col: int = 0
+
 
 # ── Statements ───────────────────────────────────────────────────────────────
 
@@ -368,6 +403,14 @@ class ExprStmt:
     line: int = 0
     col: int = 0
 
+@dataclass
+class AsmStmt:
+    """Bare asm { "line1" "line2" } statement block."""
+    lines: List[str]
+    volatile: bool = True
+    line: int = 0
+    col: int = 0
+
 
 # ── Top-level declarations ────────────────────────────────────────────────────
 
@@ -392,6 +435,7 @@ class StructField:
     type: Any
     annotations: List[str] = field(default_factory=list)
     default_value: Optional[Any] = None
+    bit_width: Optional[int] = None   # C bit-field width, e.g.  flags: u32 : 4
     line: int = 0
     col: int = 0
 
@@ -482,6 +526,23 @@ class ModuleDecl:
 @dataclass
 class EntryBlock:
     body: Any
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class ConstDecl:
+    """const NAME: T = expr — compile-time constant, maps to #define or static const."""
+    name: str
+    type: Optional[Any]
+    value: Any
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class ExternConst:
+    """extern const NAME: T — declares a C macro / extern constant."""
+    name: str
+    type: Any
     line: int = 0
     col: int = 0
 

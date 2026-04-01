@@ -107,6 +107,8 @@ class Parser:
             return self.parse_let(annotations)
         elif tok.type == TT.IMPL:
             return self.parse_impl()
+        elif tok.type == TT.CONST:
+            return self.parse_const()
         else:
             raise ParseError(f'Unexpected token at top level', tok)
 
@@ -189,12 +191,22 @@ class Parser:
             fname = self.expect(TT.IDENT).value
             self.expect(TT.COLON)
             ftype = self.parse_type()
+            bit_width = None
+            # bit-field: field: u32 : 4
+            if self.check(TT.COLON):
+                save = self.pos
+                self.advance()
+                if self.check(TT.INT):
+                    bit_width = int(self.advance().value)
+                else:
+                    self.pos = save  # not a bit-field — roll back
             default_val = None
             if self.match(TT.EQ):
                 default_val = self.parse_expr()
             self.match(TT.COMMA)
             fields.append(ast.StructField(name=fname, type=ftype, annotations=f_annotations,
-                                          default_value=default_val, line=line, col=col))
+                                          default_value=default_val, bit_width=bit_width,
+                                          line=line, col=col))
         self.expect(TT.RBRACE)
         return ast.StructDecl(name=name, fields=fields, type_params=type_params,
                               annotations=annotations or [], line=line, col=col)
@@ -321,9 +333,29 @@ class Parser:
         return ast.ImplBlock(type_name=type_name, type_params=type_params,
                              methods=methods, line=line, col=col)
 
-    def parse_extern(self) -> ast.ExternBlock:
+    def parse_const(self) -> ast.ConstDecl:
+        line, col = self.loc()
+        self.expect(TT.CONST)
+        name = self.expect(TT.IDENT).value
+        typ = None
+        if self.match(TT.COLON):
+            typ = self.parse_type()
+        self.expect(TT.EQ)
+        value = self.parse_expr()
+        self.match(TT.SEMICOLON)
+        return ast.ConstDecl(name=name, type=typ, value=value, line=line, col=col)
+
+    def parse_extern(self):
         line, col = self.loc()
         self.expect(TT.EXTERN)
+        # extern const NAME: T  — C macro/extern constant declaration
+        if self.check(TT.CONST):
+            self.advance()
+            name = self.expect(TT.IDENT).value
+            self.expect(TT.COLON)
+            typ = self.parse_type()
+            self.match(TT.SEMICOLON)
+            return ast.ExternConst(name=name, type=typ, line=line, col=col)
         abi = self.expect(TT.STRING).value
         self.expect(TT.LBRACE)
         decls = []
@@ -333,6 +365,10 @@ class Parser:
                 ann.append(self.advance().value)
             if self.check(TT.FN):
                 decls.append(self.parse_fn(ann))
+            elif self.check(TT.STATIC):
+                decls.append(self.parse_static(ann))
+            else:
+                self.advance()  # skip unknown
         self.expect(TT.RBRACE)
         return ast.ExternBlock(abi=abi, decls=decls, line=line, col=col)
 
@@ -351,11 +387,21 @@ class Parser:
             inner = self.parse_type()
             return ast.TypeOption(inner=inner, line=line, col=col)
 
-        # *Type or *mut Type
+        # volatile T
+        if self.check(TT.VOLATILE):
+            self.advance()
+            inner = self.parse_type()
+            return ast.TypeVolatile(inner=inner, line=line, col=col)
+
+        # *Type or *mut Type or *volatile Type
         if self.match(TT.STAR):
+            vol = bool(self.match(TT.VOLATILE))
             mut = bool(self.match(TT.MUT))
             inner = self.parse_type()
-            return ast.TypePointer(inner=inner, nullable=False, mutable=mut, line=line, col=col)
+            ptr = ast.TypePointer(inner=inner, nullable=False, mutable=mut, line=line, col=col)
+            if vol:
+                return ast.TypeVolatile(inner=ptr, line=line, col=col)
+            return ptr
 
         # []Type  or  [N]Type  or  [T; N]  (Rust-style)
         if self.check(TT.LBRACKET):
@@ -521,16 +567,36 @@ class Parser:
             body = self.parse_block()
             return ast.DeferStmt(body=body, line=line, col=col)
         elif tok.type in (TT.STRUCT, TT.ENUM, TT.VARIANT):
-            # local type decl
             if tok.type == TT.STRUCT:
                 return self.parse_struct(annotations)
             elif tok.type == TT.ENUM:
                 return self.parse_enum(annotations)
             else:
                 return self.parse_variant(annotations)
+        elif tok.type == TT.CONST:
+            return self.parse_const()
+        elif tok.type == TT.ASM:
+            return self.parse_asm_stmt()
         else:
             expr = self.parse_expr()
             return ast.ExprStmt(expr=expr, line=line, col=col)
+
+    def parse_asm_stmt(self) -> ast.AsmStmt:
+        """asm { "instruction" ... } or asm volatile { ... }"""
+        line, col = self.loc()
+        self.expect(TT.ASM)
+        vol = True
+        self.expect(TT.LBRACE)
+        lines_list = []
+        while not self.check(TT.RBRACE) and not self.check(TT.EOF):
+            if self.check(TT.STRING):
+                lines_list.append(self.advance().value)
+            elif self.check(TT.SEMICOLON):
+                self.advance()
+            else:
+                self.advance()  # skip stray tokens gracefully
+        self.expect(TT.RBRACE)
+        return ast.AsmStmt(lines=lines_list, volatile=vol, line=line, col=col)
 
     def parse_let(self, annotations=None) -> ast.LetDecl:
         line, col = self.loc()
@@ -980,7 +1046,6 @@ class Parser:
         if tok.type == TT.SIZEOF:
             self.advance()
             self.expect(TT.LPAREN)
-            # Try to parse as type first, fall back to expression
             save = self.pos
             try:
                 operand = self.parse_type()
@@ -991,6 +1056,65 @@ class Parser:
                 operand = self.parse_expr()
             self.expect(TT.RPAREN)
             return ast.SizeOf(operand=operand, line=line, col=col)
+
+        # offsetof(Type, field)
+        if tok.type == TT.OFFSETOF:
+            self.advance()
+            self.expect(TT.LPAREN)
+            type_name = self.expect(TT.IDENT).value
+            self.expect(TT.COMMA)
+            field_name = self.expect(TT.IDENT).value
+            self.expect(TT.RPAREN)
+            return ast.OffsetOf(type_name=type_name, field=field_name, line=line, col=col)
+
+        # fn(...) -> T { body } — fn literal / closure
+        if tok.type == TT.FN:
+            self.advance()
+            self.expect(TT.LPAREN)
+            params = []
+            while not self.check(TT.RPAREN) and not self.check(TT.EOF):
+                mut = bool(self.match(TT.MUT))
+                pname = self.advance().value  # IDENT or keyword
+                self.expect(TT.COLON)
+                ptype = self.parse_type()
+                params.append(ast.Param(name=pname, type=ptype, mutable=mut, line=line, col=col))
+                self.match(TT.COMMA)
+            self.expect(TT.RPAREN)
+            ret_type = None
+            if self.match(TT.ARROW):
+                ret_type = self.parse_type()
+            body = self.parse_block()
+            return ast.Closure(params=params, ret_type=ret_type, body=body, line=line, col=col)
+
+        # asm("template") — inline asm expression
+        if tok.type == TT.ASM:
+            self.advance()
+            self.expect(TT.LPAREN)
+            template = self.expect(TT.STRING).value
+            outputs, inputs, clobbers = [], [], []
+            if self.match(TT.COLON):
+                while self.check(TT.STRING):
+                    constraint = self.advance().value
+                    self.expect(TT.LPAREN)
+                    expr = self.parse_expr()
+                    self.expect(TT.RPAREN)
+                    outputs.append((constraint, expr))
+                    self.match(TT.COMMA)
+            if self.match(TT.COLON):
+                while self.check(TT.STRING):
+                    constraint = self.advance().value
+                    self.expect(TT.LPAREN)
+                    expr = self.parse_expr()
+                    self.expect(TT.RPAREN)
+                    inputs.append((constraint, expr))
+                    self.match(TT.COMMA)
+            if self.match(TT.COLON):
+                while self.check(TT.STRING):
+                    clobbers.append(self.advance().value)
+                    self.match(TT.COMMA)
+            self.expect(TT.RPAREN)
+            return ast.AsmExpr(template=template, outputs=outputs, inputs=inputs,
+                               clobbers=clobbers, volatile=True, line=line, col=col)
 
         # .variant_name (enum dot access)
         if tok.type == TT.DOT:
