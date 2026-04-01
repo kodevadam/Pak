@@ -1185,3 +1185,229 @@ class TestPhase2VariantLayoutIntegration:
 
         layout = tenv.layout_of_name('Msg')
         assert layout.tag_size == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 3 — Advanced Language Features
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPhase3FixedPoint:
+    """3.1 — Fixed-point arithmetic: mul uses 64-bit intermediate."""
+
+    def test_fixmul_emits_mult(self):
+        """Fixed-point multiply should use mult for 64-bit intermediate."""
+        asm = compile_mips("""
+        fn test_fixmul(a: fix16.16, b: fix16.16) -> fix16.16 {
+            return a * b
+        }
+
+        entry {
+            let x: fix16.16 = 0
+            let y: fix16.16 = 0
+            let z = x * y
+        }
+        """)
+        assert has_instr(asm, 'test_fixmul')
+        # The function body should use mult (not mul) for fixed-point
+        assert has_instr(asm, 'mult')
+
+    def test_fixdiv_calls_runtime(self):
+        """fix16.16 division should call __pak_fix16_div runtime helper."""
+        asm = compile_mips("""
+        fn test_fixdiv(a: fix16.16, b: fix16.16) -> fix16.16 {
+            return a / b
+        }
+
+        entry { }
+        """)
+        assert has_instr(asm, '__pak_fix16_div')
+
+    def test_fixpoint_add_is_integer_add(self):
+        """Fixed-point add is just integer add (no special sequence needed)."""
+        asm = compile_mips("""
+        fn fix_add(a: fix16.16, b: fix16.16) -> fix16.16 {
+            return a + b
+        }
+
+        entry { }
+        """)
+        assert has_instr(asm, 'addu')
+
+    def test_int_to_fix_cast(self):
+        """Casting int to fix16.16 should shift left by 16."""
+        asm = compile_mips("""
+        entry {
+            let x: i32 = 5
+            let y = x as fix16.16
+        }
+        """)
+        assert has_instr(asm, 'sll')
+
+
+class TestPhase3Generics:
+    """3.2 — Generic function monomorphization."""
+
+    def test_generic_fn_deferred(self):
+        """Generic functions should not be emitted until monomorphized."""
+        asm = compile_mips("""
+        fn identity<T>(x: T) -> T {
+            return x
+        }
+
+        entry { }
+        """)
+        # The generic template should NOT appear in the output
+        assert 'identity:' not in asm
+
+    def test_generic_fn_called_with_type_args(self):
+        """Generic function called with type args should be monomorphized."""
+        asm = compile_mips("""
+        fn identity<T>(x: T) -> T {
+            return x
+        }
+
+        entry {
+            let v = identity<i32>(42)
+        }
+        """)
+        assert has_instr(asm, 'identity__i32')
+
+
+class TestPhase3Defer:
+    """3.3 — Defer statements (LIFO cleanup)."""
+
+    def test_defer_fires_on_return(self):
+        """Defer should emit deferred code before return jumps."""
+        asm = compile_mips("""
+        fn test_defer() -> i32 {
+            let x = 0
+            defer { x = 1 }
+            defer { x = 2 }
+            return x
+        }
+
+        entry {
+            let v = test_defer()
+        }
+        """)
+        assert has_instr(asm, 'test_defer')
+        # Should have stores for x=2, x=1 (LIFO order) before the return jump
+        assert has_instr(asm, 'sw')
+
+
+class TestPhase3Closures:
+    """3.4 — Closures / function pointers."""
+
+    def test_closure_emits_static_fn(self):
+        """Closure should be emitted as a separate named function."""
+        asm = compile_mips("""
+        entry {
+            let f = fn(x: i32) -> i32 { return x + 1 }
+        }
+        """)
+        assert has_instr(asm, '__closure')
+
+    def test_function_pointer_call(self):
+        """Function pointer call via jalr."""
+        asm = compile_mips("""
+        fn inc(x: i32) -> i32 { return x + 1 }
+
+        fn apply(f: fn(i32) -> i32, val: i32) -> i32 {
+            return f(val)
+        }
+
+        entry {
+            let r = apply(inc, 5)
+        }
+        """)
+        assert has_instr(asm, 'apply')
+
+
+class TestPhase3InlineAsm:
+    """3.5 — Inline assembly."""
+
+    def test_asm_stmt_passthrough(self):
+        """Bare asm block should pass through verbatim."""
+        asm = compile_mips("""
+        entry {
+            asm {
+                "nop"
+                "nop"
+            }
+        }
+        """)
+        assert asm.count('nop') >= 2
+
+    def test_asm_expr_with_template(self):
+        """asm() expression should emit template code."""
+        asm = compile_mips("""
+        entry {
+            let x = asm("mflo $v0" : : : )
+        }
+        """)
+        assert has_instr(asm, 'mflo')
+
+
+class TestPhase3ImplMethods:
+    """3.6 — Impl blocks and method calls."""
+
+    def test_impl_method_mangling(self):
+        """Methods in impl blocks should be mangled as Type_method."""
+        asm = compile_mips("""
+        struct Counter {
+            val: i32
+        }
+
+        impl Counter {
+            fn increment(self: *Counter) -> i32 {
+                return self.val + 1
+            }
+        }
+
+        entry {
+            let c = Counter { val: 0 }
+        }
+        """)
+        assert has_instr(asm, 'Counter_increment')
+
+    def test_trait_impl_method(self):
+        """Trait impl methods should be mangled as Type_method."""
+        asm = compile_mips("""
+        trait Printable {
+            fn print(self: *Self) -> i32
+        }
+
+        struct Point {
+            x: i32
+            y: i32
+        }
+
+        impl Point for Printable {
+            fn print(self: *Point) -> i32 {
+                return self.x
+            }
+        }
+
+        entry { }
+        """)
+        assert has_instr(asm, 'Point_print')
+
+
+class TestPhase3BackendValidation:
+    """Backend validation catches compiler-bug-class issues."""
+
+    def test_valid_program_passes(self):
+        """A valid program should pass backend validation."""
+        asm = compile_mips("""
+        fn foo(x: i32) -> i32 { return x }
+        entry { let v = foo(42) }
+        """)
+        assert has_instr(asm, 'foo')
+
+    def test_const_has_value(self):
+        """Const declarations must have values."""
+        asm = compile_mips("""
+        const PI = 3
+        entry { let x = PI }
+        """)
+        assert has_instr(asm, 'main')

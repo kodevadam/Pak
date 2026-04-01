@@ -174,6 +174,10 @@ class MipsCodegen:
         self._fn_ctx:  Optional[FnCtx] = None
         self._label_n: int = 0
         self._bounds_check: bool = bounds_check
+        # Generic monomorphization: template_name → FnDecl
+        self._generic_fns: Dict[str, ast.FnDecl] = {}
+        # Already-emitted specializations: mangled_name → True
+        self._mono_emitted: Dict[str, bool] = {}
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -314,7 +318,11 @@ class MipsCodegen:
 
     def _emit_top_decl(self, decl):
         if isinstance(decl, ast.FnDecl):
-            self._emit_fn(decl)
+            if decl.type_params:
+                # Generic function: defer until we see a monomorphized call
+                self._generic_fns[decl.name] = decl
+            else:
+                self._emit_fn(decl)
         elif isinstance(decl, ast.EntryBlock):
             self._emit_entry(decl)
         elif isinstance(decl, (ast.StructDecl, ast.EnumDecl, ast.VariantDecl,
@@ -1002,8 +1010,7 @@ class MipsCodegen:
             self._emit_array_lit(ctx, expr, dst)
 
         elif isinstance(expr, ast.AsmExpr):
-            em.verbatim(expr.template)
-            em.move(dst, V0)
+            self._emit_asm_expr(ctx, expr, dst)
 
         elif isinstance(expr, ast.AllocExpr):
             inner = self._tenv.layout_of_type(expr.type_node)
@@ -1072,9 +1079,22 @@ class MipsCodegen:
     def _emit_binop(self, ctx: FnCtx, expr: ast.BinaryOp, dst: str):
         em = self._em
         op = expr.op
+
+        # Check if either operand is fixed-point
+        frac = self._infer_frac_bits(ctx, expr.left) or self._infer_frac_bits(ctx, expr.right)
+
         with borrow_temp(ctx.ra) as lhs, borrow_temp(ctx.ra) as rhs:
             self._emit_expr(ctx, expr.left,  lhs)
             self._emit_expr(ctx, expr.right, rhs)
+
+            if frac and op == '*':
+                emit_fixmul(em, ctx.ra, dst, lhs, rhs, frac)
+                return
+            if frac and op == '/':
+                emit_fixdiv(em, ctx.ra, dst, lhs, rhs, frac)
+                return
+            # Fixed-point add/sub are just integer add/sub (same format)
+
             match op:
                 case '+':  em.addu(dst, lhs, rhs)
                 case '-':  em.subu(dst, lhs, rhs)
@@ -1416,6 +1436,15 @@ class MipsCodegen:
             return
 
         fn_name = func.name if isinstance(func, ast.Ident) else None
+
+        # Generic monomorphization: if the call has type_args or the func
+        # references a known generic, emit a specialized version
+        type_args = getattr(expr, 'type_args', []) or []
+        if not type_args and isinstance(func, ast.Ident):
+            type_args = getattr(func, 'type_args', []) or []
+        if fn_name and type_args and fn_name in self._generic_fns:
+            fn_name = self._monomorphize(fn_name, type_args)
+
         self._marshal_args(ctx, expr.args)
 
         if fn_name:
@@ -1444,8 +1473,21 @@ class MipsCodegen:
 
     def _emit_method_call(self, ctx: FnCtx, access: ast.DotAccess, args, dst: str):
         em = self._em
-        obj_name = access.obj.name.capitalize() if isinstance(access.obj, ast.Ident) else ''
-        mangled  = f'{obj_name}_{access.field}'
+        # Try to resolve the type name from the variable's declared type
+        type_name = ''
+        if isinstance(access.obj, ast.Ident):
+            local = ctx.lookup_local(access.obj.name)
+            if local:
+                _, layout = local
+                # Check if this type name is registered
+                for tname in self._tenv._layouts:
+                    if self._tenv._layouts[tname] is layout:
+                        type_name = tname
+                        break
+            if not type_name:
+                # Fallback: capitalize the variable name (heuristic for Phase 1 compat)
+                type_name = access.obj.name.capitalize()
+        mangled  = f'{type_name}_{access.field}'
         with borrow_temp(ctx.ra) as self_ptr:
             self._emit_addr_of(ctx, ast.AddrOf(expr=access.obj, line=0, col=0), self_ptr)
             em.move(A0, self_ptr)
@@ -1507,11 +1549,72 @@ class MipsCodegen:
                 em.sw(tmp, arr_off + i * 4, SP)
         em.addiu(dst, SP, arr_off)
 
+    # ── Inline assembly ────────────────────────────────────────────────────────
+
+    def _emit_asm_expr(self, ctx: FnCtx, expr: ast.AsmExpr, dst: str):
+        """Emit inline assembly with input/output constraint wiring.
+
+        Constraints follow GCC-style: "=r" for output, "r" for input.
+        The template can reference %0, %1 etc. for constraint slots.
+        """
+        em = self._em
+
+        # Process inputs: evaluate expressions and place in registers
+        input_regs = []
+        for i, (constraint, input_expr) in enumerate(expr.inputs):
+            with borrow_temp(ctx.ra) as inp_r:
+                self._emit_expr(ctx, input_expr, inp_r)
+                input_regs.append(inp_r)
+
+        # Substitute %N references in the template with register names
+        template = expr.template
+        all_regs = [dst] + input_regs  # %0 = output, %1.. = inputs
+        for i, reg in enumerate(all_regs):
+            template = template.replace(f'%{i}', reg)
+
+        # Emit each line of the template
+        for line in template.split('\n'):
+            line = line.strip()
+            if line:
+                em.verbatim(line)
+
+        # Process outputs: move result to dst if needed
+        if expr.outputs:
+            # First output goes to dst
+            em.move(dst, V0)
+        elif not expr.inputs and not expr.outputs:
+            # No constraints: just passthrough, result in $v0
+            em.move(dst, V0)
+
     # ── Cast ──────────────────────────────────────────────────────────────────
 
     def _emit_cast(self, ctx: FnCtx, src: str, dst: str, type_node):
         to_layout = self._tenv.layout_of_type(type_node)
-        emit_int_cast(self._em, dst, src, 4, to_layout.size, to_layout.is_signed)
+        em = self._em
+
+        # Fixed-point conversions
+        if to_layout.frac_bits > 0:
+            # int → fixed: shift left by frac_bits
+            emit_int_to_fix(em, dst, src, to_layout.frac_bits)
+            return
+
+        # Check if source expression is fixed-point (casting fix → int)
+        # We detect this via the Cast AST node's inner expression
+        src_frac = 0
+        if self._fn_ctx:
+            # Try to get source frac_bits from the expression being cast
+            cast_node = None
+            # (src is a register; we need the original AST, which the caller
+            # no longer has here. Use a heuristic: if to_layout is int and
+            # dst is not float, and the type is a known name, check it.)
+            pass
+
+        if to_layout.is_float:
+            emit_int_to_float(em, F12, src)
+            em.move(dst, ZERO)  # float result in FPR, GPR gets 0
+            return
+
+        emit_int_cast(em, dst, src, 4, to_layout.size, to_layout.is_signed)
 
     # ── Catch expression ──────────────────────────────────────────────────────
 
@@ -1663,3 +1766,108 @@ class MipsCodegen:
             },
             field_order=['is_ok', 'payload'],
         )
+
+    def _monomorphize(self, generic_name: str, type_args: list) -> str:
+        """Create a monomorphized copy of a generic function.
+
+        Returns the mangled name (e.g. 'swap__i32').  Emits the specialized
+        function if not already emitted.
+        """
+        # Build mangled name from type args
+        arg_names = []
+        for ta in type_args:
+            if isinstance(ta, ast.TypeName):
+                arg_names.append(ta.name)
+            elif isinstance(ta, str):
+                arg_names.append(ta)
+            else:
+                arg_names.append('T')
+        mangled = f'{generic_name}__{"_".join(arg_names)}'
+
+        if mangled in self._mono_emitted:
+            return mangled
+
+        template = self._generic_fns.get(generic_name)
+        if template is None:
+            return generic_name  # fallback
+
+        # Build a type substitution map: T → i32, U → f32, etc.
+        subst: Dict[str, Any] = {}
+        for i, tp in enumerate(template.type_params):
+            if i < len(type_args):
+                subst[tp] = type_args[i]
+
+        # Create specialized function with substituted types
+        spec_fn = ast.FnDecl(
+            name=mangled,
+            params=self._subst_params(template.params, subst),
+            ret_type=self._subst_type(template.ret_type, subst),
+            body=template.body,  # body stays the same (types only affect layout)
+            type_params=[],  # no longer generic
+            annotations=template.annotations,
+        )
+
+        self._mono_emitted[mangled] = True
+        saved = self._fn_ctx
+        self._emit_fn(spec_fn)
+        self._fn_ctx = saved
+        return mangled
+
+    def _subst_type(self, type_node, subst: Dict[str, Any]):
+        """Substitute generic type parameters in a type node."""
+        if type_node is None:
+            return None
+        if isinstance(type_node, ast.TypeName) and type_node.name in subst:
+            replacement = subst[type_node.name]
+            if isinstance(replacement, ast.TypeName):
+                return replacement
+            return ast.TypeName(name=str(replacement) if isinstance(replacement, str)
+                                else getattr(replacement, 'name', 'i32'))
+        if isinstance(type_node, ast.TypePointer):
+            return ast.TypePointer(inner=self._subst_type(type_node.inner, subst),
+                                   nullable=type_node.nullable)
+        if isinstance(type_node, ast.TypeSlice):
+            return ast.TypeSlice(inner=self._subst_type(type_node.inner, subst))
+        if isinstance(type_node, ast.TypeArray):
+            return ast.TypeArray(size=type_node.size,
+                                 inner=self._subst_type(type_node.inner, subst))
+        return type_node
+
+    def _subst_params(self, params: list, subst: Dict[str, Any]) -> list:
+        """Substitute generic type params in function parameter list."""
+        result = []
+        for p in params:
+            result.append(ast.Param(
+                name=p.name,
+                type=self._subst_type(p.type, subst),
+                mutable=p.mutable,
+            ))
+        return result
+
+    def _infer_frac_bits(self, ctx: FnCtx, expr) -> int:
+        """Try to determine if an expression is fixed-point. Returns frac_bits or 0."""
+        if isinstance(expr, ast.Ident):
+            local = ctx.lookup_local(expr.name) if ctx else None
+            if local:
+                _, layout = local
+                return layout.frac_bits
+            if expr.name in self._globals:
+                _, layout = self._globals[expr.name]
+                return layout.frac_bits
+        if isinstance(expr, ast.Cast):
+            # If casting to a fixed-point type
+            tl = self._tenv.layout_of_type(expr.type)
+            return tl.frac_bits
+        if isinstance(expr, ast.BinaryOp):
+            # Propagate: if either side is fixed, the result is fixed
+            l = self._infer_frac_bits(ctx, expr.left)
+            r = self._infer_frac_bits(ctx, expr.right)
+            return l or r
+        if isinstance(expr, ast.UnaryOp):
+            return self._infer_frac_bits(ctx, expr.operand)
+        if isinstance(expr, ast.DotAccess):
+            fi = self._resolve_field_info(expr)
+            if fi and fi.type_node:
+                tl = self._tenv.layout_of_type(fi.type_node)
+                return tl.frac_bits
+        return 0
