@@ -137,11 +137,36 @@ class MipsTypeEnv:
         self._enum_values: Dict[str, Dict[str, int]] = {}  # enum_name → {case → int}
         self._variant_decls = {}
 
+    # ── External (library) types ─────────────────────────────────────────────
+
+    # Well-known types from tiny3d and libdragon that PAK programs commonly
+    # import via ``use t3d.math`` etc.  These are not in the AST so we
+    # pre-register them so that ``layout_of_name`` can resolve them.
+    _EXTERNAL_TYPES: Dict[str, TypeLayout] = {
+        # tiny3d math types
+        'Vec3':        TypeLayout(size=12,  align=4,  is_float=True),
+        'Mat4':        TypeLayout(size=64,  align=4,  is_float=True),
+        'Quat':        TypeLayout(size=16,  align=4,  is_float=True),
+        'Color':       TypeLayout(size=4,   align=4),
+        'T3DMat4FP':   TypeLayout(size=128, align=16, is_float=False),
+        'T3DViewport': TypeLayout(size=128, align=16),
+    }
+
+    def _register_external_types(self) -> None:
+        """Pre-register well-known external types (tiny3d, libdragon)."""
+        for name, layout in self._EXTERNAL_TYPES.items():
+            if name not in self._layouts:
+                self._layouts[name] = layout
+
     # ── Registration ─────────────────────────────────────────────────────────
 
     def register_program(self, program) -> None:
         """Walk a parsed Program AST and register all struct/enum/variant layouts."""
         from .. import ast
+
+        # Register well-known external types first so that user structs
+        # containing e.g. Vec3 fields can resolve them.
+        self._register_external_types()
 
         # First pass: register primitives so recursive structs can use them
         # Second pass: enums, third pass: structs, fourth pass: variants

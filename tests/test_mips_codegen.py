@@ -28,9 +28,12 @@ from pak.parser import Parser
 from pak.typechecker import TypeEnv, typecheck
 from pak.mips import MipsCodegen
 from pak.mips.registers import (
-    RegAlloc, borrow_temp,
+    RegAlloc, borrow_temp, borrow_ftemp,
     A0, A1, A2, A3, V0, SP, RA, FP,
-    T0, T1, S0,
+    T0, T1, S0, S1, S2, S3, S4, S5, S6, S7,
+    _CALLER_SAVED_GPRS, _CALLEE_SAVED_GPRS,
+    _CALLER_SAVED_FPRS, _CALLEE_SAVED_FPRS,
+    F4, F20,
 )
 from pak.mips.abi import classify_args, classify_return, build_frame
 from pak.mips.types import MipsTypeEnv, TypeLayout
@@ -83,7 +86,11 @@ class TestRegAlloc:
             if r:
                 regs.append(r)
         assert len(regs) == 10
-        assert ra.alloc_temp() is None
+        # After exhausting caller-saved temps, alloc_temp falls back to
+        # callee-saved registers instead of returning None.
+        fallback = ra.alloc_temp()
+        assert fallback is not None
+        assert fallback in _CALLEE_SAVED_GPRS
 
     def test_saved_regs_tracked(self):
         ra = RegAlloc()
@@ -2047,3 +2054,168 @@ class TestPhase6InlineAsm:
         assert 'sync_caches:' in asm
         assert '    sync' in asm
         assert '    nop' in asm
+
+
+class TestPhase7Scheduling:
+    """VR4300 instruction scheduling pass."""
+
+    def test_load_use_reordered(self):
+        """A load followed by its consumer with an independent instr after
+        should be reordered to avoid the load-use stall."""
+        from pak.mips.optimize import optimize_asm
+        asm = "\n".join([
+            "    lw $t0, 0($sp)",
+            "    addu $t1, $t0, $t2",
+            "    addu $t3, $t4, $t5",
+        ])
+        out = optimize_asm(asm, peephole=False, schedule=True,
+                           fill_slots=False, dead_labels=False)
+        lines = [l.strip() for l in out.split('\n') if l.strip()]
+        # The independent instruction should be moved between load and use
+        assert lines[0] == 'lw $t0, 0($sp)'
+        assert lines[1] == 'addu $t3, $t4, $t5'
+        assert lines[2] == 'addu $t1, $t0, $t2'
+
+    def test_mult_mflo_filled(self):
+        """An independent instruction after mflo should be moved between
+        mult and mflo."""
+        from pak.mips.optimize import optimize_asm
+        asm = "\n".join([
+            "    mult $t0, $t1",
+            "    mflo $t2",
+            "    addu $t3, $t4, $t5",
+        ])
+        out = optimize_asm(asm, peephole=False, schedule=True,
+                           fill_slots=False, dead_labels=False)
+        lines = [l.strip() for l in out.split('\n') if l.strip()]
+        assert lines[0] == 'mult $t0, $t1'
+        # Independent instr should now sit between mult and mflo
+        assert lines[1] == 'addu $t3, $t4, $t5'
+        assert lines[2] == 'mflo $t2'
+
+    def test_no_reorder_across_dependency(self):
+        """Instructions that all depend on each other must not be reordered."""
+        from pak.mips.optimize import optimize_asm
+        asm = "\n".join([
+            "    lw $t0, 0($sp)",
+            "    addu $t1, $t0, $t2",
+            "    addu $t3, $t1, $t4",
+        ])
+        out = optimize_asm(asm, peephole=False, schedule=True,
+                           fill_slots=False, dead_labels=False)
+        lines = [l.strip() for l in out.split('\n') if l.strip()]
+        # Order must be preserved — no independent instruction to move
+        assert lines[0] == 'lw $t0, 0($sp)'
+        assert lines[1] == 'addu $t1, $t0, $t2'
+        assert lines[2] == 'addu $t3, $t1, $t4'
+
+    def test_no_reorder_across_branch(self):
+        """Instructions must not be moved across a branch boundary."""
+        from pak.mips.optimize import optimize_asm
+        asm = "\n".join([
+            "    lw $t0, 0($sp)",
+            "    addu $t1, $t0, $t2",
+            "    beq $t1, $zero, .L1",
+            "    nop",
+            "    addu $t3, $t4, $t5",
+            ".L1:",
+        ])
+        out = optimize_asm(asm, peephole=False, schedule=True,
+                           fill_slots=False, dead_labels=False)
+        # The addu $t3 must NOT be moved before the branch
+        branch_idx = None
+        addu_t3_idx = None
+        for idx, line in enumerate(out.split('\n')):
+            if 'beq' in line:
+                branch_idx = idx
+            if 'addu $t3' in line:
+                addu_t3_idx = idx
+        assert branch_idx is not None
+        assert addu_t3_idx is not None
+        assert addu_t3_idx > branch_idx
+
+
+class TestPhase7RegAlloc:
+    """Register allocator fallback and callee-saved tracking."""
+
+    def test_temp_fallback_to_saved(self):
+        """When all caller-saved GPR temps are exhausted, alloc_temp falls
+        back to the callee-saved pool instead of returning None."""
+        ra = RegAlloc()
+        # Exhaust all caller-saved temps
+        temps = []
+        for _ in range(len(_CALLER_SAVED_GPRS)):
+            t = ra.alloc_temp()
+            assert t is not None
+            temps.append(t)
+        # Next alloc should fall back to a callee-saved reg
+        fallback = ra.alloc_temp()
+        assert fallback is not None
+        assert fallback in _CALLEE_SAVED_GPRS
+
+    def test_ftemp_fallback_to_fsaved(self):
+        """When all caller-saved FPR temps are exhausted, alloc_ftemp falls
+        back to the callee-saved FPR pool."""
+        ra = RegAlloc()
+        ftemps = []
+        for _ in range(len(_CALLER_SAVED_FPRS)):
+            f = ra.alloc_ftemp()
+            assert f is not None
+            ftemps.append(f)
+        # Next alloc should fall back to callee-saved FPR
+        fallback = ra.alloc_ftemp()
+        assert fallback is not None
+        assert fallback in _CALLEE_SAVED_FPRS
+
+    def test_used_callee_gprs_tracks_fallback(self):
+        """A callee-saved register used via temp fallback appears in
+        used_callee_gprs so the prologue/epilogue saves it."""
+        ra = RegAlloc()
+        # Exhaust caller-saved temps
+        held = []
+        for _ in range(len(_CALLER_SAVED_GPRS)):
+            held.append(ra.alloc_temp())
+        # Allocate one more — should be callee-saved
+        extra = ra.alloc_temp()
+        assert extra is not None
+        assert extra in ra.used_callee_gprs
+        # After freeing, it should still appear in used_callee_gprs
+        # (because the function needs prologue save/restore for it)
+        ra.free_temp(extra)
+        assert extra in ra.used_callee_gprs
+
+    def test_borrow_temp_fallback(self):
+        """borrow_temp works even when caller-saved pool is exhausted,
+        falling back to callee-saved via alloc_temp."""
+        ra = RegAlloc()
+        held = []
+        for _ in range(len(_CALLER_SAVED_GPRS)):
+            held.append(ra.alloc_temp())
+        # borrow_temp should not raise — it falls back to saved
+        with borrow_temp(ra) as reg:
+            assert reg in _CALLEE_SAVED_GPRS
+        # After the context manager exits, the saved reg goes back to
+        # the saved pool, not the temp pool
+        assert reg in ra._free_saved
+
+    def test_heavy_register_pressure(self):
+        """Compile a function with many simultaneous temporaries — should
+        produce valid assembly without crashing."""
+        src = """
+        fn pressure() -> i32 {
+            let a: i32 = 1;
+            let b: i32 = 2;
+            let c: i32 = 3;
+            let d: i32 = 4;
+            let e: i32 = 5;
+            let f: i32 = 6;
+            let g: i32 = 7;
+            let h: i32 = 8;
+            let i: i32 = a + b + c + d + e + f + g + h;
+            return i;
+        }
+        """
+        asm = compile_mips(src)
+        assert 'pressure:' in asm
+        # Should contain a return
+        assert 'jr $ra' in asm

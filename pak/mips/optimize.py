@@ -1,8 +1,8 @@
-"""MIPS peephole optimizer and delay-slot filler (Phase 5).
+"""MIPS peephole optimizer, instruction scheduler, and delay-slot filler (Phase 5).
 
 Runs as a post-processing pass on the assembly text produced by MipsCodegen.
 The optimizer operates on lines of text, not a structured IR, keeping it
-simple and robust.  It performs three categories of optimization:
+simple and robust.  It performs four categories of optimization:
 
 1. **Peephole optimizations** — local patterns that can be replaced with
    shorter or faster sequences:
@@ -15,14 +15,22 @@ simple and robust.  It performs three categories of optimization:
    - Strength reduction: ``mul $d, $s, $t`` where ``$t`` is known power-of-2
      → ``sll $d, $s, log2(N)``
 
-2. **Branch delay slot filling** — moves a useful instruction into the
+2. **VR4300 instruction scheduling** — reorders instructions within basic
+   blocks to reduce pipeline stalls on the N64's VR4300 CPU:
+   - Load-use hazards: inserts independent instructions between a load and
+     its consumer to avoid a 1-cycle stall.
+   - Multiply latency: fills cycles between ``mult``/``multu`` and
+     ``mflo``/``mfhi`` with independent work.
+   - Divide latency: similarly fills cycles after ``div``/``divu``.
+
+3. **Branch delay slot filling** — moves a useful instruction into the
    delay slot of a branch/jump, removing the ``nop`` that Phase 1 placed there:
    - If the instruction *before* the branch is independent of the branch
      condition and the instruction in the delay slot, move it into the slot.
    - Conservative: only fills slots with simple ALU/load instructions that
      don't touch the branch's condition register.
 
-3. **Redundant label elimination** — labels that are never referenced are
+4. **Redundant label elimination** — labels that are never referenced are
    removed (along with any preceding blank line).
 
 Usage::
@@ -232,6 +240,205 @@ def _fill_delay_slots(lines: List[str]) -> List[str]:
     return result
 
 
+# ── VR4300 instruction scheduling ────────────────────────────────────────────
+
+_LOAD_OPS = frozenset(['lw', 'lh', 'lb', 'lhu', 'lbu', 'lwc1'])
+_MULT_OPS = frozenset(['mult', 'multu'])
+_DIV_OPS = frozenset(['div', 'divu'])
+_MFHILO_OPS = frozenset(['mflo', 'mfhi'])
+
+
+def _is_independent(line_a: str, line_b: str) -> bool:
+    """Return True if *line_b* can be moved before *line_a* without changing
+    semantics.  Both must be parsed as instructions.  Conservative: returns
+    False on any ambiguity."""
+    pa = _parse_line(line_a)
+    pb = _parse_line(line_b)
+    if not pa or not pb:
+        return False
+    op_a, operands_a = pa
+    op_b, operands_b = pb
+    # Never move branches, jumps, syscalls, nops, or HI/LO producers
+    if (_is_branch_or_jump(op_b) or op_b in ('nop', 'sync', 'syscall',
+            'mult', 'multu', 'div', 'divu', 'mflo', 'mfhi')):
+        return False
+    reads_a = _regs_read(op_a, operands_a)
+    writes_a = _regs_written(op_a, operands_a)
+    reads_b = _regs_read(op_b, operands_b)
+    writes_b = _regs_written(op_b, operands_b)
+    # WAR: b writes something a reads
+    if writes_b & reads_a:
+        return False
+    # RAW: b reads something a writes
+    if reads_b & writes_a:
+        return False
+    # WAW: both write same register
+    if writes_b & writes_a:
+        return False
+    return True
+
+
+def _schedule_vr4300(lines: List[str]) -> List[str]:
+    """Reorder instructions within basic blocks to reduce VR4300 pipeline stalls.
+
+    Handles three hazard classes:
+    - Load-use (1-cycle stall if loaded reg used immediately)
+    - Multiply (mflo/mfhi stalls if issued within ~5 cycles of mult/multu)
+    - Divide  (mflo/mfhi stalls if issued within ~37 cycles of div/divu)
+
+    Only reorders within basic blocks and only when provably safe.
+    """
+    # Split into basic blocks.  A basic block boundary is a label line,
+    # a branch/jump instruction, or the instruction in a delay slot
+    # (the one right after a branch/jump).
+    blocks: List[List[str]] = []
+    current: List[str] = []
+
+    prev_was_branch = False
+    for line in lines:
+        parsed = _parse_line(line)
+        is_label = bool(_RE_LABEL.match(line))
+
+        if is_label:
+            # Label starts a new block
+            if current:
+                blocks.append(current)
+            current = [line]
+            prev_was_branch = False
+        elif parsed and _is_branch_or_jump(parsed[0]):
+            # Branch/jump: include it in current block, mark boundary after delay slot
+            current.append(line)
+            prev_was_branch = True
+        elif prev_was_branch:
+            # Delay slot instruction — include then end block
+            current.append(line)
+            blocks.append(current)
+            current = []
+            prev_was_branch = False
+        else:
+            current.append(line)
+            prev_was_branch = False
+
+    if current:
+        blocks.append(current)
+
+    result: List[str] = []
+    for block in blocks:
+        result.extend(_schedule_block(block))
+    return result
+
+
+def _schedule_block(block: List[str]) -> List[str]:
+    """Schedule a single basic block for VR4300 hazard avoidance."""
+    lines = list(block)
+    i = 0
+    while i < len(lines):
+        parsed = _parse_line(lines[i])
+        if not parsed:
+            i += 1
+            continue
+
+        op, operands = parsed
+
+        # ── Load-use hazard ──────────────────────────────────────────────
+        if op in _LOAD_OPS and i + 1 < len(lines):
+            written = _regs_written(op, operands)
+            next_parsed = _parse_line(lines[i + 1])
+            if next_parsed:
+                next_reads = _regs_read(next_parsed[0], next_parsed[1])
+                if written & next_reads:
+                    # Hazard: next instruction reads what we just loaded.
+                    # Search forward for an independent instruction to insert.
+                    moved = _find_and_move_between(lines, i, i + 1)
+                    if moved:
+                        i += 1
+                        continue
+
+        # ── Multiply / Divide → mflo/mfhi hazard ────────────────────────
+        if op in _MULT_OPS or op in _DIV_OPS:
+            max_fill = 4  # try to fill up to 4 slots
+            _fill_before_mfhilo(lines, i, max_fill)
+
+        i += 1
+
+    return lines
+
+
+def _find_and_move_between(lines: List[str], load_idx: int, use_idx: int) -> bool:
+    """Try to find an instruction after *use_idx* that is independent of both
+    the load and the use, and move it between them.  Returns True on success."""
+    for j in range(use_idx + 1, len(lines)):
+        candidate = lines[j]
+        cp = _parse_line(candidate)
+        if not cp:
+            continue
+        # Don't move past or grab labels / branches
+        if _RE_LABEL.match(candidate) or _is_branch_or_jump(cp[0]):
+            break
+        # Candidate must be independent of the load and ALL instructions
+        # between the load and j (inclusive of use).
+        ok = True
+        for k in range(load_idx, j):
+            if not _is_independent(lines[k], candidate):
+                ok = False
+                break
+        if ok:
+            moved = lines.pop(j)
+            lines.insert(use_idx, moved)
+            return True
+    return False
+
+
+def _fill_before_mfhilo(lines: List[str], mult_idx: int, max_fill: int) -> None:
+    """Try to move independent instructions between mult/div and the first
+    mflo/mfhi that follows it."""
+    # Find the mflo/mfhi
+    mf_idx = None
+    for k in range(mult_idx + 1, len(lines)):
+        kp = _parse_line(lines[k])
+        if not kp:
+            continue
+        if _RE_LABEL.match(lines[k]) or _is_branch_or_jump(kp[0]):
+            return  # crossed a block boundary, bail
+        if kp[0] in _MFHILO_OPS:
+            mf_idx = k
+            break
+
+    if mf_idx is None or mf_idx == mult_idx + 1:
+        # No mflo/mfhi found, or nothing to fill
+        if mf_idx is not None and mf_idx == mult_idx + 1:
+            # Need to fill — search AFTER mflo for independent instructions
+            filled = 0
+            search_start = mf_idx + 1
+            for j in range(search_start, len(lines)):
+                if filled >= max_fill:
+                    break
+                candidate = lines[j]
+                cp = _parse_line(candidate)
+                if not cp:
+                    continue
+                if _RE_LABEL.match(candidate) or _is_branch_or_jump(cp[0]):
+                    break
+                if cp[0] in _MFHILO_OPS:
+                    break
+                # Must be independent of the mult and all instructions
+                # between mult and j
+                ok = True
+                for k in range(mult_idx, j):
+                    if not _is_independent(lines[k], candidate):
+                        ok = False
+                        break
+                if ok:
+                    moved = lines.pop(j)
+                    lines.insert(mult_idx + 1, moved)
+                    filled += 1
+                    # mf_idx shifted right by 1
+        return
+
+    # Already have gap between mult and mfhilo — nothing extra to do
+    return
+
+
 # ── Dead label elimination ───────────────────────────────────────────────────
 
 def _eliminate_dead_labels(lines: List[str]) -> List[str]:
@@ -273,9 +480,16 @@ def _eliminate_dead_labels(lines: List[str]) -> List[str]:
 # ── Public API ───────────────────────────────────────────────────────────────
 
 def optimize_asm(asm_text: str, *, peephole: bool = True,
+                 schedule: bool = True,
                  fill_slots: bool = True,
                  dead_labels: bool = True) -> str:
     """Optimize MIPS assembly text. Returns the optimized text.
+
+    Passes (in order):
+      1. Peephole — local pattern rewrites
+      2. VR4300 scheduling — reorder to reduce pipeline stalls
+      3. Delay-slot filling — move useful work into branch delay slots
+      4. Dead label elimination — remove unreferenced local labels
 
     All optimizations are conservative and correctness-preserving.
     """
@@ -283,6 +497,9 @@ def optimize_asm(asm_text: str, *, peephole: bool = True,
 
     if peephole:
         lines = _peephole(lines)
+
+    if schedule:
+        lines = _schedule_vr4300(lines)
 
     if fill_slots:
         lines = _fill_delay_slots(lines)

@@ -370,7 +370,6 @@ class TestExamplePrograms:
         assert 'main:' in asm
         assert len(asm) > 100
 
-    @pytest.mark.xfail(reason="model_viewer uses Vec3 from tiny3d — external type not yet registered")
     def test_model_viewer_pak(self):
         asm = self._compile_example('examples/model_viewer.pak')
         assert 'main:' in asm

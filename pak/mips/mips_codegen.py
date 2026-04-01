@@ -417,11 +417,12 @@ class MipsCodegen:
                 arg_reg = [A0, A1, A2, A3][i]
                 self._store_to_sp(off, arg_reg, p_layout)
 
-        # We'll emit prologue after scanning body; for now record the insert point.
-        # Strategy: emit prologue inline with a conservative frame size.
-        # Phase 5 will make this precise; for now assume 256 bytes.
+        # Emit a placeholder for the prologue; we patch it after the body
+        # so that we know exactly which callee-saved registers were used.
         frame_size = 256  # conservative; refined after body scan
-        self._emit_prologue(ctx, frame_size)
+        prologue_start = len(self._em._buf)
+        self._emit_prologue_placeholder(frame_size)
+        prologue_end = len(self._em._buf)
 
         # Emit body
         ret_label = self._fresh_label(f'.L{decl.name}_ret')
@@ -432,6 +433,9 @@ class MipsCodegen:
         defers = ctx.pop_scope()
         for d in defers:
             self._emit_stmt(ctx, d)
+
+        # Now we know used callee-saved regs — patch the prologue
+        self._patch_prologue(ctx, frame_size, prologue_start, prologue_end)
 
         # Return label
         self._em.label(ret_label)
@@ -448,18 +452,45 @@ class MipsCodegen:
         )
         self._emit_fn(fn)
 
-    def _emit_prologue(self, ctx: FnCtx, frame_size: int):
+    def _emit_prologue_placeholder(self, frame_size: int):
+        """Emit a conservative prologue that will be patched later."""
         em = self._em
         em.addiu(SP, SP, -frame_size)
         em.sw(RA, frame_size - 4, SP)
         em.sw(FP, frame_size - 8, SP)
         em.addiu(FP, SP, frame_size)
-        # Save callee-saved regs used by allocator (conservative: save s0-s2)
-        em.sw(S0, frame_size - 12, SP)
+        # Placeholder line for callee-saved saves (patched by _patch_prologue)
+        em.raw('    # callee-saves-placeholder')
+
+    def _patch_prologue(self, ctx: FnCtx, frame_size: int,
+                        prologue_start: int, prologue_end: int):
+        """Replace the prologue placeholder with actual callee-saved saves."""
+        callee_gprs = ctx.ra.used_callee_gprs
+        callee_fprs = ctx.ra.used_callee_fprs
+        lines: list[str] = []
+        for i, reg in enumerate(callee_gprs):
+            lines.append(f'    sw {reg}, {frame_size - 12 - i * 4}({SP})')
+        fpr_base = frame_size - 12 - len(callee_gprs) * 4
+        for i, freg in enumerate(callee_fprs):
+            lines.append(f'    swc1 {freg}, {fpr_base - i * 4}({SP})')
+        # Find and replace the placeholder comment
+        for idx in range(prologue_start, prologue_end):
+            if 'callee-saves-placeholder' in self._em._buf[idx]:
+                self._em._buf[idx:idx + 1] = lines
+                break
 
     def _emit_epilogue(self, ctx: FnCtx, frame_size: int):
         em = self._em
-        em.lw(S0, frame_size - 12, SP)
+        # Restore callee-saved registers (reverse order of save)
+        callee_gprs = ctx.ra.used_callee_gprs
+        callee_fprs = ctx.ra.used_callee_fprs
+        fpr_base = frame_size - 12 - len(callee_gprs) * 4
+        for i, freg in enumerate(reversed(callee_fprs)):
+            ri = len(callee_fprs) - 1 - i
+            em.raw(f'    lwc1 {freg}, {fpr_base - ri * 4}({SP})')
+        for i, reg in enumerate(reversed(callee_gprs)):
+            ri = len(callee_gprs) - 1 - i
+            em.lw(reg, frame_size - 12 - ri * 4, SP)
         em.lw(FP, frame_size - 8, SP)
         em.lw(RA, frame_size - 4, SP)
         em.addiu(SP, SP, frame_size)
