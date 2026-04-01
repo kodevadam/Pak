@@ -371,7 +371,17 @@ class MipsCodegen:
         init_val = None
         if decl.value is not None:
             init_val = self._eval_const_expr(decl.value)
-        self._pool.add_static(decl.name, layout.size, layout.align, init_val)
+
+        # Check for @aligned(N) annotation
+        forced_align = layout.align
+        for ann in getattr(decl, 'annotations', []):
+            if isinstance(ann, str) and ann.startswith('aligned('):
+                try:
+                    forced_align = max(forced_align, int(ann[8:-1]))
+                except ValueError:
+                    pass
+
+        self._pool.add_static(decl.name, layout.size, forced_align, init_val)
         self._globals[decl.name] = (0, layout)
 
     # ── Function emission ─────────────────────────────────────────────────────
@@ -1177,30 +1187,38 @@ class MipsCodegen:
     # ── Memory helpers ────────────────────────────────────────────────────────
 
     def _emit_typed_load(self, dst: str, offset: int, base: str,
-                         layout: TypeLayout) -> None:
+                         layout: TypeLayout, volatile: bool = False) -> None:
         """Load a value from base+offset using the correct width instruction."""
         em = self._em
+        if volatile:
+            em.sync()
         if layout.is_float:
             em.lwc1(dst, offset, base) if layout.size == 4 else em.ldc1(dst, offset, base)
-            return
-        match layout.size:
-            case 1: em.lbu(dst, offset, base) if not layout.is_signed else em.lb(dst, offset, base)
-            case 2: em.lhu(dst, offset, base) if not layout.is_signed else em.lh(dst, offset, base)
-            case 4: em.lw(dst, offset, base)
-            case _: em.lw(dst, offset, base)  # multi-word handled by caller
+        else:
+            match layout.size:
+                case 1: em.lbu(dst, offset, base) if not layout.is_signed else em.lb(dst, offset, base)
+                case 2: em.lhu(dst, offset, base) if not layout.is_signed else em.lh(dst, offset, base)
+                case 4: em.lw(dst, offset, base)
+                case _: em.lw(dst, offset, base)  # multi-word handled by caller
+        if volatile:
+            em.sync()
 
     def _emit_typed_store(self, src: str, offset: int, base: str,
-                          layout: TypeLayout) -> None:
+                          layout: TypeLayout, volatile: bool = False) -> None:
         """Store a value to base+offset using the correct width instruction."""
         em = self._em
+        if volatile:
+            em.sync()
         if layout.is_float:
             em.swc1(src, offset, base) if layout.size == 4 else em.sdc1(src, offset, base)
-            return
-        match layout.size:
-            case 1: em.sb(src, offset, base)
-            case 2: em.sh(src, offset, base)
-            case 4: em.sw(src, offset, base)
-            case _: em.sw(src, offset, base)
+        else:
+            match layout.size:
+                case 1: em.sb(src, offset, base)
+                case 2: em.sh(src, offset, base)
+                case 4: em.sw(src, offset, base)
+                case _: em.sw(src, offset, base)
+        if volatile:
+            em.sync()
 
     def _load_from_sp(self, offset: int, dst: str, layout: TypeLayout):
         self._emit_typed_load(dst, offset, SP, layout)
@@ -1261,9 +1279,11 @@ class MipsCodegen:
             if fi:
                 fl = TypeLayout(size=fi.size, align=fi.align,
                                 is_signed=True if fi.size < 4 else True)
+                vol = False
                 if fi.type_node:
                     fl = self._tenv.layout_of_type(fi.type_node)
-                self._emit_typed_load(dst, fi.offset, base, fl)
+                    vol = isinstance(fi.type_node, ast.TypeVolatile)
+                self._emit_typed_load(dst, fi.offset, base, fl, volatile=vol)
             else:
                 em.lw(dst, 0, base)
 
@@ -1274,9 +1294,11 @@ class MipsCodegen:
             fi = self._resolve_field_info(expr)
             if fi:
                 fl = TypeLayout(size=fi.size, align=fi.align)
+                vol = False
                 if fi.type_node:
                     fl = self._tenv.layout_of_type(fi.type_node)
-                self._emit_typed_store(val, fi.offset, base, fl)
+                    vol = isinstance(fi.type_node, ast.TypeVolatile)
+                self._emit_typed_store(val, fi.offset, base, fl, volatile=vol)
             else:
                 em.sw(val, 0, base)
 
@@ -1425,12 +1447,15 @@ class MipsCodegen:
             return
 
         if isinstance(func, ast.DotAccess):
-            # Check if this is Type.CaseName(args) — variant constructor via dot
             if isinstance(func.obj, ast.Ident):
-                type_name = func.obj.name
-                case_name = func.field
-                if type_name in self._tenv._variant_decls:
-                    self._emit_variant_constructor(ctx, type_name, case_name, expr.args, dst)
+                obj_name = func.obj.name
+                # Check if this is a module call: display.init(), controller.read() etc.
+                if self._rt.lookup(obj_name, func.field) is not None:
+                    self._emit_module_call(ctx, obj_name, func.field, expr.args, dst)
+                    return
+                # Check if this is Type.CaseName(args) — variant constructor via dot
+                if obj_name in self._tenv._variant_decls:
+                    self._emit_variant_constructor(ctx, obj_name, func.field, expr.args, dst)
                     return
             self._emit_method_call(ctx, func, expr.args, dst)
             return

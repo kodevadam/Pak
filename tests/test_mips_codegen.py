@@ -1411,3 +1411,166 @@ class TestPhase3BackendValidation:
         entry { let x = PI }
         """)
         assert has_instr(asm, 'main')
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 4 — N64 Hardware Interface
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPhase4ModuleCalls:
+    """4.1 — Module function mapping to libdragon symbols."""
+
+    def test_display_init_maps_to_symbol(self):
+        """n64.display.init() should emit jal display_init."""
+        asm = compile_mips("""
+        use n64.display
+
+        entry {
+            display.init(0, 0, 2, 0, 0)
+        }
+        """)
+        assert has_instr(asm, 'jal display_init')
+
+    def test_rdpq_attach_maps_to_symbol(self):
+        """n64.rdpq.attach() should emit jal rdpq_attach."""
+        asm = compile_mips("""
+        use n64.rdpq
+
+        entry {
+            let disp = 0
+            rdpq.attach(disp, 0)
+        }
+        """)
+        assert has_instr(asm, 'jal rdpq_attach')
+
+    def test_controller_read_maps_to_joypad(self):
+        """n64.controller.read() maps to joypad_get_status."""
+        asm = compile_mips("""
+        use n64.controller
+
+        entry {
+            let input = controller.read(0)
+        }
+        """)
+        assert has_instr(asm, 'joypad_get_status')
+
+    def test_timer_init(self):
+        asm = compile_mips("""
+        use n64.timer
+        entry { timer.init() }
+        """)
+        assert has_instr(asm, 'jal timer_init')
+
+    def test_debug_log(self):
+        asm = compile_mips("""
+        use n64.debug
+        entry { debug.log("hello") }
+        """)
+        assert has_instr(asm, 'jal debugf')
+
+    def test_sprite_load(self):
+        asm = compile_mips("""
+        use n64.sprite
+        entry {
+            let s = sprite.load("hero.sprite")
+        }
+        """)
+        assert has_instr(asm, 'sprite_load')
+
+
+class TestPhase4AssetReferences:
+    """4.2 — Asset references emit .extern directives."""
+
+    def test_asset_decl_emits_extern(self):
+        """asset decl should produce .extern for the asset symbol."""
+        asm = compile_mips("""
+        asset hero_sprite from "hero.sprite"
+
+        entry { }
+        """)
+        assert has_instr(asm, '.extern hero_sprite')
+
+
+class TestPhase4VolatileAndSync:
+    """4.3 — Volatile reads/writes emit sync instructions."""
+
+    def test_aligned_static_emits_align(self):
+        """@aligned(16) static should have .align directive in output."""
+        asm = compile_mips("""
+        @aligned(16)
+        static dma_buffer: i32 = 0
+
+        entry { }
+        """)
+        # .align 4 corresponds to 16-byte alignment (log2(16) = 4)
+        assert has_instr(asm, '.align')
+
+    def test_extern_symbols_present(self):
+        """All runtime helpers should be declared as .extern."""
+        asm = compile_mips("""
+        entry { }
+        """)
+        assert has_instr(asm, '.extern __pak_alloc')
+        assert has_instr(asm, '.extern __pak_free')
+        assert has_instr(asm, '.extern __pak_panic')
+        assert has_instr(asm, '.extern memcpy')
+
+
+class TestPhase4Integration:
+    """4.4 — N64 hardware integration tests."""
+
+    def test_simple_game_loop(self):
+        """A simple game loop compiles to valid assembly structure."""
+        asm = compile_mips("""
+        use n64.display
+        use n64.controller
+        use n64.rdpq
+
+        entry {
+            display.init(0, 0, 2, 0, 0)
+
+            let running = true
+            while running {
+                let input = controller.read(0)
+                let disp = display.get()
+                rdpq.attach(disp, 0)
+                rdpq.detach_show()
+            }
+        }
+        """)
+        assert has_instr(asm, 'main:')
+        assert has_instr(asm, 'jal display_init')
+        assert has_instr(asm, 'jal display_get')
+        assert has_instr(asm, 'jal rdpq_attach')
+        assert has_instr(asm, 'jal rdpq_detach_show')
+
+    def test_function_with_n64_calls(self):
+        """Functions that call N64 APIs produce correct jal sequences."""
+        asm = compile_mips("""
+        use n64.debug
+
+        fn log_score(score: i32) {
+            debug.log("Score: ")
+        }
+
+        entry {
+            log_score(100)
+        }
+        """)
+        assert has_instr(asm, 'log_score')
+        assert has_instr(asm, 'jal debugf')
+
+    def test_multiple_modules(self):
+        """Multiple module uses should all have their symbols available."""
+        asm = compile_mips("""
+        use n64.display
+        use n64.timer
+        use n64.audio
+
+        entry {
+            display.init(0, 0, 2, 0, 0)
+            timer.init()
+        }
+        """)
+        assert has_instr(asm, 'jal display_init')
+        assert has_instr(asm, 'jal timer_init')
