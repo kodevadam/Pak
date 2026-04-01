@@ -76,6 +76,20 @@ class TypeVolatile:
     line: int = 0
     col: int = 0
 
+@dataclass
+class TypeTuple:
+    """Tuple type: (T1, T2, T3)"""
+    elements: List[Any]
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class TypeDynTrait:
+    """Trait-object type: dyn TraitName  (used as *dyn TraitName or standalone)."""
+    name: str
+    line: int = 0
+    col: int = 0
+
 
 # ── Expressions ──────────────────────────────────────────────────────────────
 
@@ -120,6 +134,8 @@ class Ident:
     name: str
     line: int = 0
     col: int = 0
+    # Turbofish type arguments, e.g. foo::<i32>() — populated by parser, read by codegen
+    type_args: List[Any] = field(default_factory=list)
 
 @dataclass
 class DotAccess:
@@ -127,6 +143,8 @@ class DotAccess:
     field: str
     line: int = 0
     col: int = 0
+    # For variant match patterns: Variant.case(binding) — holds the bound variable name
+    binding: Optional[str] = None
 
 @dataclass
 class IndexAccess:
@@ -282,6 +300,38 @@ class Closure:
     col: int = 0
 
 @dataclass
+class TupleLit:
+    """Tuple literal expression: (e1, e2, e3)"""
+    elements: List[Any]
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class TupleAccess:
+    """Tuple element access: t.0, t.1 ..."""
+    obj: Any
+    index: int
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class AllocExpr:
+    """alloc(T) or alloc(T, n) — heap allocation primitive."""
+    type_node: Any          # type to allocate
+    count: Optional[Any]    # element count; None means single item
+    allocator: Optional[Any] = None   # NEW: custom allocator expression
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class FreeExpr:
+    """free(ptr) — heap deallocation primitive."""
+    ptr: Any
+    allocator: Optional[Any] = None   # NEW: custom allocator expression
+    line: int = 0
+    col: int = 0
+
+@dataclass
 class AsmExpr:
     """asm("template" : outputs : inputs : clobbers) — inline assembly"""
     template: str
@@ -369,6 +419,23 @@ class WhileStmt:
     col: int = 0
 
 @dataclass
+class DoWhileStmt:
+    """do { body } while cond — execute body first, then check condition."""
+    body: Any
+    condition: Any
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class ComptimeIf:
+    """comptime if (expr) { ... } else { ... } — emits #if / #else / #endif."""
+    condition: Any       # expression that maps to a C preprocessor condition
+    then: Any            # Block
+    else_branch: Optional[Any] = None   # Block or None
+    line: int = 0
+    col: int = 0
+
+@dataclass
 class ForStmt:
     index: Optional[str]
     binding: str
@@ -409,6 +476,20 @@ class AsmStmt:
     """Bare asm { "line1" "line2" } statement block."""
     lines: List[str]
     volatile: bool = True
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class GotoStmt:
+    """goto label_name;"""
+    label: str
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class LabelStmt:
+    """label_name: — a C label, used as goto target."""
+    name: str
     line: int = 0
     col: int = 0
 
@@ -461,6 +542,15 @@ class StructDecl:
     name: str
     fields: List[Any]
     type_params: List[str] = field(default_factory=list)
+    annotations: List[str] = field(default_factory=list)
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class UnionDecl:
+    """union Name { field: Type; ... } — untagged C union for type-punning."""
+    name: str
+    fields: List[Any]            # same StructField nodes as StructDecl
     annotations: List[str] = field(default_factory=list)
     line: int = 0
     col: int = 0
@@ -560,6 +650,34 @@ class ExternConst:
     """extern const NAME: T — declares a C macro / extern constant."""
     name: str
     type: Any
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class TraitDecl:
+    """trait Name { fn method_sig(self: *Self) -> T; }"""
+    name: str
+    methods: List[Any]       # List[FnDecl] — signatures (bodies may be absent)
+    annotations: List[str] = field(default_factory=list)
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class ImplTraitBlock:
+    """impl TypeName for TraitName { fn method(self: *TypeName) { ... } }"""
+    type_name: str
+    trait_name: str
+    methods: List[Any]
+    type_params: List[str] = field(default_factory=list)
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class CfgBlock:
+    """@cfg(FEATURE) decl — conditional compilation wrapper."""
+    feature: str
+    negated: bool        # True for @cfg(not(FEATURE)) → #ifndef
+    decl: Any            # the wrapped top-level declaration
     line: int = 0
     col: int = 0
 

@@ -76,41 +76,63 @@ class Parser:
         return ast.Program(decls=decls)
 
     def parse_top_level(self):
-        # Collect annotations
+        # Collect annotations — separate @cfg(...) from regular ones
         annotations = []
+        cfg_ann = None
         while self.check(TT.ANNOTATION):
-            annotations.append(self.advance().value)
+            ann = self.advance().value
+            if ann.startswith('@cfg('):
+                cfg_ann = ann  # last @cfg wins
+            else:
+                annotations.append(ann)
 
+        line, col = self.loc()
         tok = self.peek()
 
         if tok.type == TT.USE:
-            return self.parse_use()
+            decl = self.parse_use()
         elif tok.type == TT.ASSET:
-            return self.parse_asset()
+            decl = self.parse_asset()
         elif tok.type == TT.MODULE:
-            return self.parse_module()
+            decl = self.parse_module()
         elif tok.type == TT.STRUCT:
-            return self.parse_struct(annotations)
+            decl = self.parse_struct(annotations)
         elif tok.type == TT.ENUM:
-            return self.parse_enum(annotations)
+            decl = self.parse_enum(annotations)
         elif tok.type == TT.VARIANT:
-            return self.parse_variant(annotations)
+            decl = self.parse_variant(annotations)
         elif tok.type == TT.FN:
-            return self.parse_fn(annotations)
+            decl = self.parse_fn(annotations)
         elif tok.type == TT.ENTRY:
-            return self.parse_entry()
+            decl = self.parse_entry()
         elif tok.type == TT.EXTERN:
-            return self.parse_extern()
+            decl = self.parse_extern()
         elif tok.type == TT.STATIC:
-            return self.parse_static(annotations)
+            decl = self.parse_static(annotations)
         elif tok.type == TT.LET:
-            return self.parse_let(annotations)
+            decl = self.parse_let(annotations)
         elif tok.type == TT.IMPL:
-            return self.parse_impl()
+            decl = self.parse_impl()
         elif tok.type == TT.CONST:
-            return self.parse_const()
+            decl = self.parse_const()
+        elif tok.type == TT.TRAIT:
+            decl = self.parse_trait(annotations)
+        elif tok.type == TT.UNION:
+            decl = self.parse_union(annotations)
         else:
             raise ParseError(f'Unexpected token at top level', tok)
+
+        # Wrap in CfgBlock if a @cfg annotation was present
+        if cfg_ann and decl is not None:
+            feature_str = cfg_ann[5:-1].strip()  # strip '@cfg(' and ')'
+            negated = feature_str.startswith('not(')
+            if negated:
+                feature = feature_str[4:-1].strip()
+            else:
+                feature = feature_str
+            decl = ast.CfgBlock(feature=feature, negated=negated, decl=decl,
+                                 line=line, col=col)
+        return decl
 
     def _parse_generic_params(self) -> List[str]:
         """Parse optional <T, U, V> generic parameter list after a name."""
@@ -309,11 +331,35 @@ class Parser:
         body = self.parse_block()
         return ast.EntryBlock(body=body, line=line, col=col)
 
-    def parse_impl(self) -> ast.ImplBlock:
+    def parse_impl(self):
         line, col = self.loc()
         self.expect(TT.IMPL)
         type_name = self.expect(TT.IDENT).value
         type_params = self._parse_generic_params()
+
+        # impl TypeName for TraitName { ... }
+        if self.match(TT.FOR):
+            trait_name = self.expect(TT.IDENT).value
+            self.expect(TT.LBRACE)
+            methods = []
+            while not self.check(TT.RBRACE) and not self.check(TT.EOF):
+                ann = []
+                while self.check(TT.ANNOTATION):
+                    ann.append(self.advance().value)
+                if self.check(TT.FN):
+                    m = self.parse_fn(ann)
+                    m.is_method = True
+                    if not m.self_type:
+                        m.self_type = type_name
+                    methods.append(m)
+                else:
+                    self.advance()
+            self.expect(TT.RBRACE)
+            return ast.ImplTraitBlock(type_name=type_name, trait_name=trait_name,
+                                      methods=methods, type_params=type_params,
+                                      line=line, col=col)
+
+        # Regular impl block: impl TypeName { ... }
         self.expect(TT.LBRACE)
         methods = []
         while not self.check(TT.RBRACE) and not self.check(TT.EOF):
@@ -332,6 +378,50 @@ class Parser:
         self.expect(TT.RBRACE)
         return ast.ImplBlock(type_name=type_name, type_params=type_params,
                              methods=methods, line=line, col=col)
+
+    def parse_trait(self, annotations=None) -> ast.TraitDecl:
+        line, col = self.loc()
+        self.expect(TT.TRAIT)
+        name = self.expect(TT.IDENT).value
+        self.expect(TT.LBRACE)
+        methods = []
+        while not self.check(TT.RBRACE) and not self.check(TT.EOF):
+            ann = []
+            while self.check(TT.ANNOTATION):
+                ann.append(self.advance().value)
+            if self.check(TT.FN):
+                m = self.parse_fn(ann)
+                methods.append(m)
+            else:
+                self.advance()  # skip stray tokens
+        self.expect(TT.RBRACE)
+        return ast.TraitDecl(name=name, methods=methods,
+                             annotations=annotations or [], line=line, col=col)
+
+    def parse_union(self, annotations=None) -> ast.UnionDecl:
+        """union Name { field: Type; ... } — untagged C union."""
+        line, col = self.loc()
+        self.expect(TT.UNION)
+        name = self.expect(TT.IDENT).value
+        self.expect(TT.LBRACE)
+        fields = []
+        while not self.check(TT.RBRACE) and not self.check(TT.EOF):
+            ann = []
+            while self.check(TT.ANNOTATION):
+                ann.append(self.advance().value)
+            if self.check(TT.FN):
+                # Unions can have methods too (impl block preferred, but allow here)
+                break
+            if self.check(TT.IDENT):
+                fname = self.advance().value
+                self.expect(TT.COLON)
+                ftype = self.parse_type()
+                fields.append(ast.StructField(name=fname, type=ftype,
+                                              annotations=ann, line=line, col=col))
+            self.match(TT.COMMA)
+        self.expect(TT.RBRACE)
+        return ast.UnionDecl(name=name, fields=fields,
+                             annotations=annotations or [], line=line, col=col)
 
     def parse_const(self) -> ast.ConstDecl:
         line, col = self.loc()
@@ -377,6 +467,30 @@ class Parser:
     def parse_type(self) -> Any:
         line, col = self.loc()
         tok = self.peek()
+
+        # (T1, T2) — tuple type, or (T) — parenthesized type
+        if self.check(TT.LPAREN):
+            self.advance()
+            if self.check(TT.RPAREN):
+                self.advance()
+                return ast.TypeTuple(elements=[], line=line, col=col)
+            first = self.parse_type()
+            if self.check(TT.COMMA):
+                elements = [first]
+                while self.match(TT.COMMA):
+                    if self.check(TT.RPAREN):
+                        break  # trailing comma allowed
+                    elements.append(self.parse_type())
+                self.expect(TT.RPAREN)
+                return ast.TypeTuple(elements=elements, line=line, col=col)
+            self.expect(TT.RPAREN)
+            return first  # parenthesized type, not a tuple
+
+        # dyn TraitName — trait-object type
+        if self.check(TT.DYN):
+            self.advance()
+            name = self.expect(TT.IDENT).value
+            return ast.TypeDynTrait(name=name, line=line, col=col)
 
         # ?*Type  or  ?Type
         if self.match(TT.QUESTION):
@@ -464,9 +578,9 @@ class Parser:
             inner = self.parse_type()
             self.expect(TT.RPAREN)
             return ast.TypeOption(inner=inner, line=line, col=col)
-        # FixedList(T, N) / RingBuffer(T, N) / FixedMap(K, V, N) / Pool(T, N)
+        # FixedList(T, N) / RingBuffer(T, N) / FixedMap(K, V, N) / Pool(T, N) / Vec(T)
         # type args may be types OR integer literals
-        if name in ('FixedList', 'RingBuffer', 'FixedMap', 'Pool') and self.check(TT.LPAREN):
+        if name in ('FixedList', 'RingBuffer', 'FixedMap', 'Pool', 'Vec') and self.check(TT.LPAREN):
             self.advance()
             args = []
             while not self.check(TT.RPAREN) and not self.check(TT.EOF):
@@ -592,6 +706,35 @@ class Parser:
             return self.parse_const()
         elif tok.type == TT.ASM:
             return self.parse_asm_stmt()
+        elif tok.type == TT.GOTO:
+            self.advance()
+            label = self.expect(TT.IDENT).value
+            return ast.GotoStmt(label=label, line=line, col=col)
+        elif tok.type == TT.DO:
+            # do { body } while cond
+            self.advance()
+            body = self.parse_block()
+            self.expect(TT.WHILE)
+            cond = self.parse_expr()
+            return ast.DoWhileStmt(body=body, condition=cond, line=line, col=col)
+        elif tok.type == TT.COMPTIME:
+            # comptime if (expr) { ... } else { ... }
+            self.advance()
+            self.expect(TT.IF)
+            self.expect(TT.LPAREN)
+            cond = self.parse_expr()
+            self.expect(TT.RPAREN)
+            then = self.parse_block()
+            else_b = None
+            if self.match(TT.ELSE):
+                else_b = self.parse_block()
+            return ast.ComptimeIf(condition=cond, then=then, else_branch=else_b,
+                                  line=line, col=col)
+        elif tok.type == TT.IDENT and self.peek(1).type == TT.COLON and self.peek(2).type != TT.COLON:
+            # label_name: — label declaration (but not :: which is a path separator)
+            label_name = self.advance().value
+            self.advance()  # consume ':'
+            return ast.LabelStmt(name=label_name, line=line, col=col)
         else:
             expr = self.parse_expr()
             return ast.ExprStmt(expr=expr, line=line, col=col)
@@ -755,10 +898,8 @@ class Parser:
                         binding = self.expect(TT.IDENT).value
                     self.expect(TT.RPAREN)
                 pat = ast.DotAccess(obj=ast.Ident(name=name, line=line, col=col),
-                                    field=variant, line=line, col=col)
-                if binding:
-                    # Attach the binding as a named arg hack — codegen looks for it
-                    pat._binding = binding
+                                    field=variant, binding=binding or None,
+                                    line=line, col=col)
                 return pat
             return ast.Ident(name=name, line=line, col=col)
         elif self.check(TT.TRUE):
@@ -786,7 +927,7 @@ class Parser:
                 return ast.Assign(target=left, value=right, op=op, line=line, col=col)
         for op_tt, op_str in [
             (TT.PLUS_EQ, '+='), (TT.MINUS_EQ, '-='),
-            (TT.STAR_EQ, '*='), (TT.SLASH_EQ, '/='),
+            (TT.STAR_EQ, '*='), (TT.SLASH_EQ, '/='), (TT.PERCENT_EQ, '%='),
             (TT.SHL_EQ, '<<='), (TT.SHR_EQ, '>>='),
             (TT.AMP_EQ, '&='), (TT.PIPE_EQ, '|='), (TT.CARET_EQ, '^='),
         ]:
@@ -931,9 +1072,21 @@ class Parser:
                 # e.g.  => return 1   \n  .down => ...   — the `.down` is a pattern not a field
                 if self.peek(1).type == TT.IDENT and self.peek(2).type == TT.FAT_ARROW:
                     break
-                self.advance()
-                field = self.expect(TT.IDENT).value
-                expr = ast.DotAccess(obj=expr, field=field, line=line, col=col)
+                self.advance()  # consume '.'
+                if self.check(TT.INT):
+                    # Tuple field access: t.0, t.1, ...
+                    idx_tok = self.advance()
+                    expr = ast.TupleAccess(obj=expr, index=int(idx_tok.value),
+                                           line=line, col=col)
+                else:
+                    # After '.', any word token (IDENT or keyword) is a valid field name.
+                    tok_field = self.peek()
+                    if tok_field.value and tok_field.value[:1].isalpha() or (
+                            tok_field.value and tok_field.value[:1] == '_'):
+                        field = self.advance().value
+                    else:
+                        field = self.expect(TT.IDENT).value
+                    expr = ast.DotAccess(obj=expr, field=field, line=line, col=col)
             elif self.check(TT.LPAREN):
                 self.advance()
                 args = []
@@ -948,10 +1101,10 @@ class Parser:
                         args.append(self.parse_expr())
                     self.match(TT.COMMA)
                 self.expect(TT.RPAREN)
-                # Pick up any pending generic type args stored on the func ident
-                type_args = getattr(expr, '_pending_type_args', [])
-                if hasattr(expr, '_pending_type_args'):
-                    del expr._pending_type_args
+                # Pick up turbofish type args stored on the func ident (e.g. foo::<i32>())
+                type_args = expr.type_args if isinstance(expr, ast.Ident) else []
+                if isinstance(expr, ast.Ident) and expr.type_args:
+                    expr.type_args = []   # consume; field exists so no deletion needed
                 expr = ast.Call(func=expr, args=args, type_args=type_args, line=line, col=col)
             elif self.check(TT.LBRACKET):
                 self.advance()
@@ -1025,12 +1178,24 @@ class Parser:
             self.advance()
             return ast.Ident(name='self', line=line, col=col)
 
-        # Grouped expression or tuple
+        # Grouped expression or tuple literal: (expr) vs (e1, e2, ...)
         if tok.type == TT.LPAREN:
             self.advance()
-            expr = self.parse_expr()
+            if self.check(TT.RPAREN):
+                self.advance()
+                return ast.TupleLit(elements=[], line=line, col=col)
+            first = self.parse_expr()
+            if self.check(TT.COMMA):
+                # Tuple literal
+                elements = [first]
+                while self.match(TT.COMMA):
+                    if self.check(TT.RPAREN):
+                        break  # trailing comma
+                    elements.append(self.parse_expr())
+                self.expect(TT.RPAREN)
+                return ast.TupleLit(elements=elements, line=line, col=col)
             self.expect(TT.RPAREN)
-            return expr
+            return first  # parenthesized expression
 
         # Array literal: [a, b, c] or [val; N]
         if tok.type == TT.LBRACKET:
@@ -1106,6 +1271,37 @@ class Parser:
             field_name = self.expect(TT.IDENT).value
             self.expect(TT.RPAREN)
             return ast.OffsetOf(type_name=type_name, field=field_name, line=line, col=col)
+
+        # alloc(T) or alloc(T, n) or alloc(T using a) or alloc(T, n using a)
+        if tok.type == TT.ALLOC:
+            self.advance()
+            self.expect(TT.LPAREN)
+            type_node = self.parse_type()
+            count = None
+            allocator = None
+            if self.match(TT.COMMA):
+                # peek: if it's "using" keyword (ident), count remains None and we read allocator
+                # otherwise parse count expression, then check for "using"
+                if not (self.check(TT.IDENT) and self.peek().value == 'using'):
+                    count = self.parse_expr()
+            # check for "using allocator_expr"
+            if self.check(TT.IDENT) and self.peek().value == 'using':
+                self.advance()  # consume 'using'
+                allocator = self.parse_expr()
+            self.expect(TT.RPAREN)
+            return ast.AllocExpr(type_node=type_node, count=count, allocator=allocator, line=line, col=col)
+
+        # free(ptr) or free(ptr using a)
+        if tok.type == TT.FREE:
+            self.advance()
+            self.expect(TT.LPAREN)
+            ptr = self.parse_expr()
+            allocator = None
+            if self.check(TT.IDENT) and self.peek().value == 'using':
+                self.advance()  # consume 'using'
+                allocator = self.parse_expr()
+            self.expect(TT.RPAREN)
+            return ast.FreeExpr(ptr=ptr, allocator=allocator, line=line, col=col)
 
         # fn(...) -> T { body } — fn literal / closure
         if tok.type == TT.FN:
@@ -1207,8 +1403,7 @@ class Parser:
                 # Discard type args, they were probably a comparison
                 pass
             elif type_args:
-                # Store type args for pick-up in parse_postfix as a temporary node
-                ident._pending_type_args = type_args
+                ident.type_args = type_args
             return ident
 
         if tok.type == TT.INT:
@@ -1228,30 +1423,70 @@ class Parser:
     def _parse_string_or_fmtstr(self, raw: str, line: int, col: int):
         """Parse a string literal, detecting {expr} interpolation.
         Returns StringLit if no interpolation, FmtStr otherwise.
+
+        {{ and }} are escape sequences for literal { and } characters.
         """
         import re
-        if '{' not in raw:
+        # Quick exit: no braces at all
+        if '{' not in raw and '}' not in raw:
             return ast.StringLit(value=raw, line=line, col=col)
-        pattern = re.compile(r'\{([^}]+)\}')
-        parts = []
-        last = 0
-        for m in pattern.finditer(raw):
-            if m.start() > last:
-                parts.append(raw[last:m.start()])
-            expr_src = m.group(1).strip()
-            try:
-                tokens = Lexer(expr_src).tokenize()
-                sub_expr = Parser(tokens).parse_expr()
-                parts.append(sub_expr)
-            except Exception:
-                # Failed to parse: treat as literal
-                parts.append('{' + expr_src + '}')
-            last = m.end()
-        if last < len(raw):
-            parts.append(raw[last:])
-        # If every part is a string, it's just a plain StringLit
+        # If the only braces are escaped ({{ or }}) it's a plain string after substitution
+        escaped_only = re.sub(r'\{\{|\}\}', '', raw)
+        if '{' not in escaped_only:
+            # Replace {{ → { and }} → } and return plain StringLit
+            return ast.StringLit(value=raw.replace('{{', '{').replace('}}', '}'),
+                                 line=line, col=col)
+        # Match single { ... } for interpolation, but skip {{ and }}
+        # Strategy: split the string on {{ / }} escapes first, then find {expr} in each piece.
+        # We process character-by-character to correctly skip {{ and }}.
+        parts: list = []
+        i = 0
+        seg: list = []   # accumulate literal characters
+
+        while i < len(raw):
+            ch = raw[i]
+            if ch == '{':
+                if i + 1 < len(raw) and raw[i + 1] == '{':
+                    seg.append('{')
+                    i += 2
+                else:
+                    # Start of interpolation
+                    j = i + 1
+                    depth = 1
+                    while j < len(raw) and depth > 0:
+                        if raw[j] == '{':
+                            depth += 1
+                        elif raw[j] == '}':
+                            depth -= 1
+                        j += 1
+                    expr_src = raw[i + 1:j - 1].strip()
+                    if seg:
+                        parts.append(''.join(seg))
+                        seg = []
+                    try:
+                        tokens = Lexer(expr_src).tokenize()
+                        sub_expr = Parser(tokens).parse_expr()
+                        parts.append(sub_expr)
+                    except Exception:
+                        parts.append('{' + expr_src + '}')
+                    i = j
+            elif ch == '}':
+                if i + 1 < len(raw) and raw[i + 1] == '}':
+                    seg.append('}')
+                    i += 2
+                else:
+                    # Stray } — treat as literal
+                    seg.append(ch)
+                    i += 1
+            else:
+                seg.append(ch)
+                i += 1
+
+        if seg:
+            parts.append(''.join(seg))
+
         if all(isinstance(p, str) for p in parts):
-            return ast.StringLit(value=raw, line=line, col=col)
+            return ast.StringLit(value=''.join(parts), line=line, col=col)
         return ast.FmtStr(parts=parts, line=line, col=col)
 
     def _is_struct_literal_context(self) -> bool:

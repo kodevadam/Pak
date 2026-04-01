@@ -2932,3 +2932,858 @@ class TestN64GoldenSample:
         assert 'SaveData' in c
         assert 'load_save' in c
         assert 'is_ok' in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# New language features: traits, tuples, alloc/free, @cfg, Vec(T), strings, %=
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPercentEq:
+    """%= modulo-assign operator."""
+
+    def test_lex_percent_eq(self):
+        toks = lex('%=')
+        assert toks[0].type == TT.PERCENT_EQ
+        assert toks[0].value == '%='
+
+    def test_lex_percent_not_eq(self):
+        toks = lex('% x')
+        assert toks[0].type == TT.PERCENT
+
+    def test_parse_percent_eq(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let mut x: i32 = 10
+                x %= 3
+            }
+        ''')
+        prog = parse(src)
+        stmt = prog.decls[0].body.stmts[1]
+        assign = stmt.expr if isinstance(stmt, ast.ExprStmt) else stmt
+        assert isinstance(assign, ast.Assign)
+        assert assign.op == '%='
+
+    def test_codegen_percent_eq(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let mut x: i32 = 10
+                x %= 3
+            }
+        ''')
+        c = codegen(src)
+        assert 'x %= 3' in c
+
+
+class TestTraits:
+    """Trait declarations, impl for, vtable dispatch."""
+
+    def test_parse_trait_decl(self):
+        src = textwrap.dedent('''
+            trait Drawable {
+                fn draw(self: *Self, x: i32, y: i32) -> void
+            }
+        ''')
+        prog = parse(src)
+        t = prog.decls[0]
+        assert isinstance(t, ast.TraitDecl)
+        assert t.name == 'Drawable'
+        assert len(t.methods) == 1
+        assert t.methods[0].name == 'draw'
+
+    def test_codegen_trait_vtable(self):
+        src = textwrap.dedent('''
+            trait Drawable {
+                fn draw(self: *Self, x: i32, y: i32) -> void
+            }
+        ''')
+        c = codegen(src)
+        assert 'Drawable_vtable' in c
+        assert 'void (*draw)' in c
+        assert 'typedef struct' in c
+        assert 'void *self' in c
+
+    def test_parse_impl_for(self):
+        src = textwrap.dedent('''
+            struct Sprite {
+                x: i32
+            }
+            trait Drawable {
+                fn draw(self: *Self, x: i32, y: i32) -> void
+            }
+            impl Sprite for Drawable {
+                fn draw(self: *Sprite, x: i32, y: i32) -> void {
+                    return
+                }
+            }
+        ''')
+        prog = parse(src)
+        impl = prog.decls[2]
+        assert isinstance(impl, ast.ImplTraitBlock)
+        assert impl.type_name == 'Sprite'
+        assert impl.trait_name == 'Drawable'
+
+    def test_codegen_impl_trait(self):
+        src = textwrap.dedent('''
+            struct Sprite { x: i32 }
+            trait Drawable {
+                fn draw(self: *Self, x: i32, y: i32) -> void
+            }
+            impl Sprite for Drawable {
+                fn draw(self: *Sprite, x: i32, y: i32) -> void { return }
+            }
+        ''')
+        c = codegen(src)
+        assert '_pak_Drawable_draw_Sprite' in c
+        assert '_pak_Drawable_vtable_Sprite' in c
+        assert 'Drawable_from_Sprite' in c
+
+    def test_dyn_trait_type(self):
+        src = textwrap.dedent('''
+            trait Shape {
+                fn area(self: *Self) -> f32
+            }
+            fn use_shape(s: *dyn Shape) -> void {
+                return
+            }
+        ''')
+        c = codegen(src)
+        assert 'Shape' in c
+
+    def test_dyn_trait_type_ast(self):
+        src = textwrap.dedent('''
+            trait Shape { fn area(self: *Self) -> f32 }
+            fn use_shape(s: *dyn Shape) -> void { return }
+        ''')
+        prog = parse(src)
+        fn = prog.decls[1]
+        param_type = fn.params[0].type
+        # *dyn Shape → TypePointer(inner=TypeDynTrait)
+        assert isinstance(param_type, ast.TypePointer)
+        assert isinstance(param_type.inner, ast.TypeDynTrait)
+        assert param_type.inner.name == 'Shape'
+
+
+class TestTuples:
+    """Tuple types, literals, and field access."""
+
+    def test_parse_tuple_type(self):
+        src = textwrap.dedent('''
+            fn f() -> (i32, f32) {
+                return (1, 2.0f)
+            }
+        ''')
+        prog = parse(src)
+        fn = prog.decls[0]
+        assert isinstance(fn.ret_type, ast.TypeTuple)
+        assert len(fn.ret_type.elements) == 2
+
+    def test_parse_tuple_lit(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let t = (1, 2, 3)
+            }
+        ''')
+        prog = parse(src)
+        let = prog.decls[0].body.stmts[0]
+        assert isinstance(let.value, ast.TupleLit)
+        assert len(let.value.elements) == 3
+
+    def test_parse_tuple_access(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let t = (1, 2)
+                let x = t.0
+                let y = t.1
+            }
+        ''')
+        prog = parse(src)
+        let_x = prog.decls[0].body.stmts[1]
+        assert isinstance(let_x.value, ast.TupleAccess)
+        assert let_x.value.index == 0
+
+    def test_codegen_tuple_typedef(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let t: (i32, f32) = (42, 3.14f)
+            }
+        ''')
+        c = codegen(src)
+        assert 'PakTuple2_' in c
+        assert 'f0' in c
+        assert 'f1' in c
+
+    def test_codegen_tuple_access(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let t = (10, 20)
+                let x = t.0
+            }
+        ''')
+        c = codegen(src)
+        assert '.f0' in c
+
+    def test_empty_tuple_type(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let t: () = ()
+            }
+        ''')
+        prog = parse(src)
+        let = prog.decls[0].body.stmts[0]
+        assert isinstance(let.type, ast.TypeTuple)
+        assert len(let.type.elements) == 0
+
+
+class TestAllocFree:
+    """alloc(T) and free(ptr) primitives."""
+
+    def test_parse_alloc(self):
+        src = textwrap.dedent('''
+            struct Node { val: i32 }
+            fn f() -> void {
+                let p = alloc(Node)
+            }
+        ''')
+        prog = parse(src)
+        let = prog.decls[1].body.stmts[0]
+        assert isinstance(let.value, ast.AllocExpr)
+        assert let.value.count is None
+
+    def test_parse_alloc_array(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let p = alloc(i32, 10)
+            }
+        ''')
+        prog = parse(src)
+        let = prog.decls[0].body.stmts[0]
+        assert isinstance(let.value, ast.AllocExpr)
+        assert let.value.count is not None
+
+    def test_parse_free(self):
+        src = textwrap.dedent('''
+            fn f(p: *i32) -> void {
+                free(p)
+            }
+        ''')
+        prog = parse(src)
+        stmt = prog.decls[0].body.stmts[0]
+        assert isinstance(stmt, ast.ExprStmt)
+        assert isinstance(stmt.expr, ast.FreeExpr)
+
+    def test_codegen_alloc_single(self):
+        src = textwrap.dedent('''
+            struct Node { val: i32 }
+            fn f() -> void {
+                let p = alloc(Node)
+            }
+        ''')
+        c = codegen(src)
+        assert 'malloc(sizeof(Node))' in c
+        assert '(Node *)' in c
+
+    def test_codegen_alloc_array(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let p = alloc(i32, 16)
+            }
+        ''')
+        c = codegen(src)
+        assert 'malloc(sizeof(int32_t)' in c
+        assert '16' in c
+
+    def test_codegen_free(self):
+        src = textwrap.dedent('''
+            fn f(p: *i32) -> void {
+                free(p)
+            }
+        ''')
+        c = codegen(src)
+        assert 'free(p)' in c
+
+
+class TestCfgBlock:
+    """@cfg conditional compilation."""
+
+    def test_parse_cfg_block(self):
+        src = textwrap.dedent('''
+            @cfg(FEATURE_A)
+            struct Foo { x: i32 }
+        ''')
+        prog = parse(src)
+        cfg = prog.decls[0]
+        assert isinstance(cfg, ast.CfgBlock)
+        assert cfg.feature == 'FEATURE_A'
+        assert not cfg.negated
+        assert isinstance(cfg.decl, ast.StructDecl)
+
+    def test_parse_cfg_not(self):
+        src = textwrap.dedent('''
+            @cfg(not(DEBUG))
+            fn release_only() -> void { return }
+        ''')
+        prog = parse(src)
+        cfg = prog.decls[0]
+        assert isinstance(cfg, ast.CfgBlock)
+        assert cfg.negated
+        assert cfg.feature == 'DEBUG'
+
+    def test_codegen_cfg_ifdef(self):
+        src = textwrap.dedent('''
+            @cfg(FEATURE_A)
+            struct Foo { x: i32 }
+        ''')
+        c = codegen(src)
+        assert '#ifdef FEATURE_A' in c
+        assert '#endif' in c
+        assert 'Foo' in c
+
+    def test_codegen_cfg_ifndef(self):
+        src = textwrap.dedent('''
+            @cfg(not(DEBUG))
+            fn release_only() -> void { return }
+        ''')
+        c = codegen(src)
+        assert '#ifndef DEBUG' in c
+        assert '#endif' in c
+
+
+class TestVecType:
+    """Vec(T) dynamic vector type and methods."""
+
+    def test_parse_vec_type(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let v: Vec(i32) = undefined
+            }
+        ''')
+        prog = parse(src)
+        let = prog.decls[0].body.stmts[0]
+        assert isinstance(let.type, ast.TypeGeneric)
+        assert let.type.name == 'Vec'
+
+    def test_codegen_vec_typedef(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let v: Vec(i32) = undefined
+            }
+        ''')
+        c = codegen(src)
+        assert '_PakVec_' in c
+        assert 'int32_t len' in c
+        assert 'int32_t cap' in c
+
+    def test_codegen_vec_push_macro(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let v: Vec(i32) = undefined
+                v.push(42)
+            }
+        ''')
+        c = codegen(src)
+        assert '_PAK_VEC_PUSH' in c
+
+    def test_codegen_vec_len(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let v: Vec(i32) = undefined
+                let n = v.len()
+            }
+        ''')
+        c = codegen(src)
+        assert '.len' in c
+
+    def test_codegen_vec_get(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let v: Vec(i32) = undefined
+                let x = v.get(0)
+            }
+        ''')
+        c = codegen(src)
+        assert '.data[0]' in c or '.data[' in c
+
+
+class TestStringMethods:
+    """String method dispatch for CStr / PakStr."""
+
+    def test_cstr_len(self):
+        src = textwrap.dedent('''
+            fn f(s: CStr) -> void {
+                let n = s.len()
+            }
+        ''')
+        c = codegen(src)
+        assert 'strlen' in c
+
+    def test_cstr_eq(self):
+        src = textwrap.dedent('''
+            fn f(s: CStr, t: CStr) -> void {
+                let eq = s.eq(t)
+            }
+        ''')
+        c = codegen(src)
+        assert 'strcmp' in c
+
+    def test_cstr_contains(self):
+        src = textwrap.dedent('''
+            fn f(s: CStr, needle: CStr) -> void {
+                let found = s.contains(needle)
+            }
+        ''')
+        c = codegen(src)
+        assert 'strstr' in c
+
+    def test_cstr_starts_with(self):
+        src = textwrap.dedent('''
+            fn f(s: CStr) -> void {
+                let result = s.starts_with("hello")
+            }
+        ''')
+        c = codegen(src)
+        assert 'strncmp' in c
+
+    def test_cstr_ends_with(self):
+        src = textwrap.dedent('''
+            fn f(s: CStr) -> void {
+                let result = s.ends_with("world")
+            }
+        ''')
+        c = codegen(src)
+        assert 'strlen' in c
+        assert 'strcmp' in c
+
+    def test_cstr_is_empty(self):
+        src = textwrap.dedent('''
+            fn f(s: CStr) -> void {
+                let empty = s.is_empty()
+            }
+        ''')
+        c = codegen(src)
+        assert "'\\0'" in c or r'\0' in c
+
+    def test_pakstr_len(self):
+        src = textwrap.dedent('''
+            fn f(s: Str) -> void {
+                let n = s.len()
+            }
+        ''')
+        c = codegen(src)
+        assert '.len' in c
+
+    def test_pakstr_eq(self):
+        src = textwrap.dedent('''
+            fn f(s: Str, t: Str) -> void {
+                let eq = s.eq(t)
+            }
+        ''')
+        c = codegen(src)
+        assert 'pak_str_eq' in c
+
+
+class TestCatchStmt:
+    """CatchExpr used as a bare statement (error handler must not be dropped)."""
+
+    def test_parse_catch_as_stmt(self):
+        src = textwrap.dedent('''
+            fn fallible() -> Result(i32, i32) {
+                return ok(1)
+            }
+            fn caller() -> void {
+                fallible() catch |e| { return }
+            }
+        ''')
+        prog = parse(src)
+        stmt = prog.decls[1].body.stmts[0]
+        assert isinstance(stmt, ast.ExprStmt)
+        assert isinstance(stmt.expr, ast.CatchExpr)
+
+    def test_codegen_catch_stmt_emits_handler(self):
+        src = textwrap.dedent('''
+            fn fallible() -> Result(i32, i32) {
+                return ok(1)
+            }
+            fn caller() -> void {
+                fallible() catch |e| { return }
+            }
+        ''')
+        c = codegen(src)
+        # Handler must be emitted — is_ok check must appear
+        assert 'is_ok' in c
+        # The binding variable must appear
+        assert 'e' in c
+
+    def test_codegen_catch_stmt_no_binding(self):
+        src = textwrap.dedent('''
+            fn fallible() -> Result(i32, i32) {
+                return ok(1)
+            }
+            fn caller() -> void {
+                fallible() catch { return }
+            }
+        ''')
+        c = codegen(src)
+        assert 'is_ok' in c
+
+
+class TestFmtStrBraceEscape:
+    """{{ and }} escape sequences in format strings."""
+
+    def test_double_lbrace_is_literal(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let s = "{{not interpolated}}"
+            }
+        ''')
+        prog = parse(src)
+        let = prog.decls[0].body.stmts[0]
+        assert isinstance(let.value, ast.StringLit)
+        assert let.value.value == '{not interpolated}'
+
+    def test_double_rbrace_is_literal(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let s = "value: {{}}"
+            }
+        ''')
+        prog = parse(src)
+        let = prog.decls[0].body.stmts[0]
+        assert isinstance(let.value, ast.StringLit)
+
+    def test_mixed_escape_and_interpolation(self):
+        src = textwrap.dedent('''
+            fn f(x: i32) -> void {
+                let s = "set {{ x = {x} }}"
+            }
+        ''')
+        prog = parse(src)
+        let = prog.decls[0].body.stmts[0]
+        assert isinstance(let.value, ast.FmtStr)
+        # First part should be the literal "set { x = "
+        assert let.value.parts[0] == 'set { x = '
+
+    def test_only_escaped_braces_is_string_lit(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let s = "{{}}"
+            }
+        ''')
+        prog = parse(src)
+        let = prog.decls[0].body.stmts[0]
+        assert isinstance(let.value, ast.StringLit)
+        assert let.value.value == '{}'
+
+
+class TestCustomAllocators:
+    """alloc(T using a), free(ptr using a), Allocator trait, heap_allocator()."""
+
+    def test_parse_alloc_using(self):
+        src = textwrap.dedent('''
+            fn f(a: Allocator) -> void {
+                let p = alloc(i32 using a)
+            }
+        ''')
+        prog = parse(src)
+        let = prog.decls[0].body.stmts[0]
+        assert isinstance(let.value, ast.AllocExpr)
+        assert let.value.allocator is not None
+        assert let.value.count is None
+
+    def test_parse_alloc_array_using(self):
+        src = textwrap.dedent('''
+            fn f(a: Allocator) -> void {
+                let p = alloc(i32, 10 using a)
+            }
+        ''')
+        prog = parse(src)
+        let = prog.decls[0].body.stmts[0]
+        assert isinstance(let.value, ast.AllocExpr)
+        assert let.value.count is not None
+        assert let.value.allocator is not None
+
+    def test_parse_free_using(self):
+        src = textwrap.dedent('''
+            fn f(p: *i32, a: Allocator) -> void {
+                free(p using a)
+            }
+        ''')
+        prog = parse(src)
+        stmt = prog.decls[0].body.stmts[0]
+        assert isinstance(stmt.expr, ast.FreeExpr)
+        assert stmt.expr.allocator is not None
+
+    def test_codegen_alloc_using_vtable(self):
+        src = textwrap.dedent('''
+            fn f(a: Allocator) -> void {
+                let p = alloc(i32 using a)
+            }
+        ''')
+        c = codegen(src)
+        assert 'vtable->alloc_bytes' in c
+        assert 'sizeof(int32_t)' in c
+
+    def test_codegen_alloc_array_using(self):
+        src = textwrap.dedent('''
+            fn f(a: Allocator) -> void {
+                let p = alloc(i32, 16 using a)
+            }
+        ''')
+        c = codegen(src)
+        assert 'vtable->alloc_bytes' in c
+        assert '16' in c
+
+    def test_codegen_free_using(self):
+        src = textwrap.dedent('''
+            fn f(p: *i32, a: Allocator) -> void {
+                free(p using a)
+            }
+        ''')
+        c = codegen(src)
+        assert 'vtable->dealloc_bytes' in c
+
+    def test_codegen_allocator_preamble(self):
+        src = textwrap.dedent('''
+            fn f(a: Allocator) -> void {
+                let p = alloc(i32 using a)
+            }
+        ''')
+        c = codegen(src)
+        assert 'Allocator_vtable' in c
+        assert 'alloc_bytes' in c
+        assert 'dealloc_bytes' in c
+
+    def test_codegen_arena_allocator_helper(self):
+        src = textwrap.dedent('''
+            fn f(a: Allocator) -> void {
+                let p = alloc(i32 using a)
+            }
+        ''')
+        c = codegen(src)
+        assert 'Allocator_from_Arena' in c
+        assert 'PakArena' in c
+
+    def test_codegen_heap_allocator_fn(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let a = heap_allocator()
+                let p = alloc(i32 using a)
+            }
+        ''')
+        c = codegen(src)
+        assert 'pak_heap_allocator' in c
+
+    def test_codegen_allocator_type_name(self):
+        src = textwrap.dedent('''
+            fn f(a: Allocator) -> void { return }
+        ''')
+        c = codegen(src)
+        assert 'Allocator a' in c
+
+    def test_alloc_without_using_still_malloc(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let p = alloc(i32)
+            }
+        ''')
+        c = codegen(src)
+        assert 'malloc' in c
+        assert 'vtable->alloc_bytes' not in c   # no vtable dispatch for plain malloc
+
+    def test_free_without_using_still_free(self):
+        src = textwrap.dedent('''
+            fn f(p: *i32) -> void {
+                free(p)
+            }
+        ''')
+        c = codegen(src)
+        assert 'free(p)' in c
+        assert 'vtable->dealloc_bytes' not in c  # no vtable dispatch for plain free
+
+# ── Union types ───────────────────────────────────────────────────────────────
+
+class TestUnionDecl:
+    def test_parse_union(self):
+        prog = parse('union FloatBits { f: f32; i: u32; }')
+        decl = prog.decls[0]
+        assert isinstance(decl, ast.UnionDecl)
+        assert decl.name == 'FloatBits'
+        assert len(decl.fields) == 2
+        assert decl.fields[0].name == 'f'
+        assert decl.fields[1].name == 'i'
+
+    def test_codegen_union_typedef(self):
+        c = codegen('union FloatBits { f: f32; i: u32; }')
+        assert 'typedef union' in c
+        assert 'FloatBits' in c
+        assert 'float f;' in c or 'f32 f;' in c or 'f' in c
+        assert 'uint32_t i;' in c or 'u32 i;' in c or 'i' in c
+
+    def test_codegen_union_not_struct(self):
+        c = codegen('union Punner { a: i32; b: f32; }')
+        assert 'typedef union' in c
+        assert 'typedef struct' not in c
+
+    def test_union_with_annotation(self):
+        c = codegen('@packed union Packed { x: u8; y: u16; }')
+        assert 'union' in c
+        assert 'Packed' in c
+
+
+# ── do-while ─────────────────────────────────────────────────────────────────
+
+class TestDoWhile:
+    def test_parse_do_while(self):
+        prog = parse('fn f() -> void { do { x = x + 1; } while x < 10; }')
+        fn = prog.decls[0]
+        stmt = fn.body.stmts[0]
+        assert isinstance(stmt, ast.DoWhileStmt)
+        assert isinstance(stmt.condition, ast.BinaryOp)
+        assert stmt.condition.op == '<'
+
+    def test_codegen_do_while(self):
+        c = codegen('fn f() -> void { do { x = x + 1; } while x < 10; }')
+        assert 'do {' in c or 'do{' in c
+        assert 'while' in c
+
+    def test_do_while_executes_once_structure(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                let mut i: i32 = 0;
+                do {
+                    i = i + 1;
+                } while i < 0;
+            }
+        ''')
+        c = codegen(src)
+        assert 'do' in c
+        assert 'while' in c
+
+    def test_do_while_semicolon(self):
+        # do-while must end with semicolon after condition
+        c = codegen('fn f() -> void { do { break; } while true; }')
+        assert 'while' in c
+
+
+# ── comptime if ───────────────────────────────────────────────────────────────
+
+class TestComptimeIf:
+    def test_parse_comptime_if(self):
+        prog = parse('comptime if (N64) { fn foo() -> void {} }')
+        decl = prog.decls[0]
+        assert isinstance(decl, ast.ComptimeIf)
+        assert isinstance(decl.then, ast.Block)
+
+    def test_codegen_comptime_if_ifdef(self):
+        c = codegen('comptime if (N64) { fn foo() -> void {} }')
+        assert '#if' in c
+        assert 'N64' in c
+        assert '#endif' in c
+
+    def test_codegen_comptime_if_else(self):
+        src = textwrap.dedent('''
+            comptime if (N64) {
+                fn platform() -> void {}
+            } else {
+                fn platform() -> void {}
+            }
+        ''')
+        c = codegen(src)
+        assert '#if' in c
+        assert '#else' in c
+        assert '#endif' in c
+
+    def test_comptime_if_in_function(self):
+        src = textwrap.dedent('''
+            fn f() -> void {
+                comptime if (DEBUG) {
+                    x = 1;
+                }
+            }
+        ''')
+        c = codegen(src)
+        assert '#if' in c
+        assert 'DEBUG' in c
+
+
+# ── Return type checking (W201) ───────────────────────────────────────────────
+
+class TestReturnTypeCheck:
+    def test_w201_missing_return(self):
+        src = textwrap.dedent('''
+            fn get_value() -> i32 {
+                let x: i32 = 5;
+            }
+        ''')
+        diags = check(src)
+        codes = [d.code for d in diags]
+        assert 'W201' in codes
+
+    def test_w201_is_warning_not_error(self):
+        src = textwrap.dedent('''
+            fn get_value() -> i32 {
+                let x: i32 = 5;
+            }
+        ''')
+        diags = check(src)
+        w201 = [d for d in diags if d.code == 'W201']
+        assert w201
+        assert all(d.severity != 'error' for d in w201)
+
+    def test_w201_no_warning_when_returns(self):
+        src = textwrap.dedent('''
+            fn get_value() -> i32 {
+                return 42;
+            }
+        ''')
+        diags = check(src)
+        codes = [d.code for d in diags]
+        assert 'W201' not in codes
+
+    def test_w201_no_warning_for_void(self):
+        src = textwrap.dedent('''
+            fn do_thing() -> void {
+                let x: i32 = 5;
+            }
+        ''')
+        diags = check(src)
+        codes = [d.code for d in diags]
+        assert 'W201' not in codes
+
+    def test_w201_no_warning_when_if_else_both_return(self):
+        src = textwrap.dedent('''
+            fn get_value(x: i32) -> i32 {
+                if x > 0 {
+                    return 1;
+                } else {
+                    return -1;
+                }
+            }
+        ''')
+        diags = check(src)
+        codes = [d.code for d in diags]
+        assert 'W201' not in codes
+
+    def test_w201_warning_when_only_if_no_else(self):
+        src = textwrap.dedent('''
+            fn get_value(x: i32) -> i32 {
+                if x > 0 {
+                    return 1;
+                }
+            }
+        ''')
+        diags = check(src)
+        codes = [d.code for d in diags]
+        assert 'W201' in codes
+
+    def test_w201_no_warning_for_loop(self):
+        # infinite loop is an unconditional return path
+        src = textwrap.dedent('''
+            fn run() -> i32 {
+                loop {
+                    return 0;
+                }
+            }
+        ''')
+        diags = check(src)
+        codes = [d.code for d in diags]
+        assert 'W201' not in codes

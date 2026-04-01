@@ -55,30 +55,45 @@ class TypeEnv:
         self.enums:    Dict[str, ast.EnumDecl]     = {}
         self.variants: Dict[str, ast.VariantDecl]  = {}
         self.fns:      Dict[str, ast.FnDecl]       = {}
+        self.traits:   Dict[str, ast.TraitDecl]    = {}
+        # trait_impls: (type_name, trait_name) → ImplTraitBlock
+        self.trait_impls: Dict[tuple, ast.ImplTraitBlock] = {}
         # variant_name → enum/variant name (for exhaustive-match lookup)
         self.enum_cases:    Dict[str, str] = {}  # case → EnumDecl name
         self.variant_cases: Dict[str, str] = {}  # case → VariantDecl name
 
     def collect(self, program: ast.Program):
         for decl in program.decls:
-            if isinstance(decl, ast.StructDecl):
-                self.structs[decl.name] = decl
-            elif isinstance(decl, ast.EnumDecl):
-                self.enums[decl.name] = decl
-                for v in decl.variants:
-                    self.enum_cases[v.name] = decl.name
-            elif isinstance(decl, ast.VariantDecl):
-                self.variants[decl.name] = decl
-                for c in decl.cases:
-                    self.variant_cases[c.name] = decl.name
-            elif isinstance(decl, ast.FnDecl):
-                self.fns[decl.name] = decl
-            elif isinstance(decl, ast.ImplBlock):
-                for m in decl.methods:
-                    prefixed = f'{decl.type_name}_{m.name}'
-                    self.fns[prefixed] = m
-            elif isinstance(decl, (ast.ConstDecl, ast.ExternConst)):
-                pass  # names registered in _check_top
+            self._collect_one(decl)
+
+    def _collect_one(self, decl):
+        if isinstance(decl, (ast.StructDecl, ast.UnionDecl)):
+            self.structs[decl.name] = decl
+        elif isinstance(decl, ast.EnumDecl):
+            self.enums[decl.name] = decl
+            for v in decl.variants:
+                self.enum_cases[v.name] = decl.name
+        elif isinstance(decl, ast.VariantDecl):
+            self.variants[decl.name] = decl
+            for c in decl.cases:
+                self.variant_cases[c.name] = decl.name
+        elif isinstance(decl, ast.FnDecl):
+            self.fns[decl.name] = decl
+        elif isinstance(decl, ast.ImplBlock):
+            for m in decl.methods:
+                prefixed = f'{decl.type_name}_{m.name}'
+                self.fns[prefixed] = m
+        elif isinstance(decl, ast.ImplTraitBlock):
+            self.trait_impls[(decl.type_name, decl.trait_name)] = decl
+            for m in decl.methods:
+                prefixed = f'{decl.type_name}_{m.name}'
+                self.fns[prefixed] = m
+        elif isinstance(decl, ast.TraitDecl):
+            self.traits[decl.name] = decl
+        elif isinstance(decl, ast.CfgBlock):
+            self._collect_one(decl.decl)
+        elif isinstance(decl, (ast.ConstDecl, ast.ExternConst)):
+            pass  # names registered in _check_top
 
     def struct_fields(self, name: str) -> Optional[Dict[str, Any]]:
         """Return {field_name: type} for a struct, or None."""
@@ -300,6 +315,24 @@ class TypeChecker:
         elif isinstance(decl, ast.ImplBlock):
             for m in decl.methods:
                 self._check_fn(m)
+        elif isinstance(decl, ast.ImplTraitBlock):
+            # Validate each method implementation against the trait signature
+            trait = self.env.traits.get(decl.trait_name)
+            if trait:
+                trait_method_names = {m.name for m in trait.methods}
+                for m in decl.methods:
+                    if m.name not in trait_method_names:
+                        self.err('E601',
+                                 f"method '{m.name}' is not declared in trait '{decl.trait_name}'",
+                                 m,
+                                 hint=f"Remove this method or add it to trait '{decl.trait_name}'")
+            for m in decl.methods:
+                self._check_fn(m)
+        elif isinstance(decl, (ast.TraitDecl, ast.UnionDecl)):
+            pass  # trait/union bodies have no expressions to check
+        elif isinstance(decl, ast.CfgBlock):
+            self._check_naming(decl.decl)
+            self._check_top(decl.decl)
         elif isinstance(decl, ast.ConstDecl):
             if decl.value:
                 self._check_expr(decl.value)
@@ -328,7 +361,39 @@ class TypeChecker:
         # @no_alloc: walk body for heap allocations
         if any(a == '@no_alloc' for a in (fn.annotations or [])):
             self._check_no_alloc_body(fn.body, fn)
+        # Return type checking: non-void functions must have at least one return
+        self._check_fn_returns(fn)
         self._current_fn = old_fn
+
+    def _check_fn_returns(self, fn: ast.FnDecl):
+        """Warn (W201) if a non-void function has no reachable return statement."""
+        if fn.ret_type is None:
+            return
+        if isinstance(fn.ret_type, ast.TypeName) and fn.ret_type.name in ('void', 'never'):
+            return
+        if not fn.body or not fn.body.stmts:
+            self.warn('W201', f"non-void function '{fn.name}' has no return statement", fn,
+                      hint="Add a return statement or change the return type to void")
+            return
+        if not self._block_has_return(fn.body):
+            self.warn('W201', f"non-void function '{fn.name}' may not return a value on all paths",
+                      fn, hint="Ensure all code paths return a value")
+
+    def _block_has_return(self, block) -> bool:
+        """Return True if the block always ends with a return/break/continue."""
+        if not block or not block.stmts:
+            return False
+        last = block.stmts[-1]
+        if isinstance(last, ast.Return):
+            return True
+        if isinstance(last, ast.IfStmt):
+            # Only guaranteed if both then and else branches return
+            if last.else_branch and self._block_has_return(last.then) \
+                    and self._block_has_return(last.else_branch):
+                return True
+        if isinstance(last, ast.LoopStmt):
+            return True  # infinite loop — never falls through
+        return False
 
     def _check_no_alloc_body(self, block: ast.Block, fn: ast.FnDecl):
         """Walk a function body and error on any heap-allocating calls."""
@@ -430,6 +495,16 @@ class TypeChecker:
             self.scope.declare(stmt.name, stmt.type or ast.TypeName(name='auto'))
         elif isinstance(stmt, ast.AsmStmt):
             pass  # raw asm — nothing to check
+        elif isinstance(stmt, (ast.GotoStmt, ast.LabelStmt)):
+            pass  # goto/labels don't introduce new bindings
+        elif isinstance(stmt, ast.DoWhileStmt):
+            self._check_block(stmt.body)
+            self._check_expr(stmt.condition)
+        elif isinstance(stmt, ast.ComptimeIf):
+            self._check_expr(stmt.condition)
+            self._check_block(stmt.then)
+            if stmt.else_branch:
+                self._check_block(stmt.else_branch)
 
     def _check_let(self, s: ast.LetDecl):
         if s.value:
@@ -470,6 +545,9 @@ class TypeChecker:
             if not self.scope.is_declared(name):
                 # Could be an enum type name — allow it
                 if name in self.env.enums or name in self.env.variants or name in self.env.structs:
+                    return
+                # Could be a trait name
+                if name in self.env.traits:
                     return
                 # Could be a function name
                 if name in self.env.fns:
@@ -593,6 +671,20 @@ class TypeChecker:
                 self.scope.declare(p.name, p.type)
             self._check_block_stmts(expr.body.stmts)
             self.scope.pop()
+
+        elif isinstance(expr, ast.TupleLit):
+            for el in expr.elements:
+                self._check_expr(el)
+
+        elif isinstance(expr, ast.TupleAccess):
+            self._check_expr(expr.obj)
+
+        elif isinstance(expr, ast.AllocExpr):
+            if expr.count is not None:
+                self._check_expr(expr.count)
+
+        elif isinstance(expr, ast.FreeExpr):
+            self._check_expr(expr.ptr)
 
     # ── Field access checking ─────────────────────────────────────────────────
 
