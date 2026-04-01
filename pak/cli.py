@@ -2,6 +2,7 @@
 
 import sys
 import os
+import shutil
 import argparse
 import subprocess
 import tomllib
@@ -22,6 +23,11 @@ def find_project_root(start: Path = None) -> Optional[Path]:
             return current
         current = current.parent
     return None
+
+
+def runtime_dir() -> Path:
+    """Return the path to the bundled runtime/ directory."""
+    return Path(__file__).parent.parent / 'runtime'
 
 
 def compile_file(pak_file: Path, verbose: bool = False) -> tuple:
@@ -46,41 +52,71 @@ def compile_file(pak_file: Path, verbose: bool = False) -> tuple:
     return c_source, program
 
 
+def load_config(root: Path) -> dict:
+    toml_path = root / 'pak.toml'
+    with open(toml_path, 'rb') as f:
+        return tomllib.load(f)
+
+
 def cmd_build(args):
-    """Build the project into a .z64 ROM."""
+    """Compile .pak → C, pack assets, and generate Makefile."""
     root = find_project_root()
     if root is None:
         print('error: no pak.toml found. Run `pak init <name>` to create a project.', file=sys.stderr)
         sys.exit(1)
 
-    toml_path = root / 'pak.toml'
-    with open(toml_path, 'rb') as f:
-        config = tomllib.load(f)
+    config = load_config(root)
+    project = config.get('project', {})
+    project_name = project.get('name', 'game')
+    rom_title = project.get('rom_title', project_name.upper()[:20])
+    save_type = project.get('save_type', 'none')
 
-    project_name = config.get('project', {}).get('name', 'game')
+    display = config.get('display', {})
+    resolution = display.get('resolution', '320x240')
+    bit_depth = display.get('bit_depth', 16)
+    framebuffers = display.get('framebuffers', 3)
+
+    deps = config.get('dependencies', {})
+    use_tiny3d = bool(deps.get('tiny3d', False))
+
+    build_cfg = config.get('build', {})
+    optimization = build_cfg.get('optimization', 'debug')
+
     print(f'Building {project_name}...')
 
     build_dir = root / 'build'
     build_dir.mkdir(exist_ok=True)
 
-    # Find all .pak files
-    src_files = list(root.glob('**/*.pak'))
+    # ── 1. Compile .pak → .c ────────────────────────────────────────────
+    src_files = [f for f in root.glob('**/*.pak')
+                 if 'build' not in f.parts]
     if not src_files:
         print('error: no .pak source files found', file=sys.stderr)
         sys.exit(1)
 
-    c_files = []
-    for pak_file in src_files:
+    c_rel_paths = []
+    for pak_file in sorted(src_files):
         rel = pak_file.relative_to(root)
         c_file = build_dir / rel.with_suffix('.c')
         c_file.parent.mkdir(parents=True, exist_ok=True)
 
-        c_source, _ = compile_file(pak_file, verbose=args.verbose)
+        c_source, _ = compile_file(pak_file, verbose=getattr(args, 'verbose', False))
         c_file.write_text(c_source, encoding='utf-8')
-        c_files.append(c_file)
+        c_rel_paths.append(c_file.relative_to(root))
         print(f'  Compiled {rel} -> {c_file.relative_to(root)}')
 
-    # Pack assets into PakFS archive
+    # ── 2. Copy runtime into project ─────────────────────────────────────
+    rt_src = runtime_dir()
+    rt_dst = root / 'runtime'
+    if rt_src.exists() and rt_src != rt_dst:
+        rt_dst.mkdir(exist_ok=True)
+        for f in rt_src.glob('*'):
+            dst = rt_dst / f.name
+            if not dst.exists():
+                shutil.copy2(f, dst)
+        print(f'  Runtime -> runtime/')
+
+    # ── 3. Pack assets into PakFS archive ────────────────────────────────
     asset_dirs = config.get('assets', {})
     packable = []
     for kind, rel_dir in asset_dirs.items():
@@ -91,25 +127,51 @@ def cmd_build(args):
                     name = str(f.relative_to(root)).replace(os.sep, '/')
                     packable.append((name, f.read_bytes()))
 
+    has_assets = bool(packable)
+    pakfs_name = f'{project_name}.pakfs'
     if packable:
         from .pakfs import pack
-        pakfs_file = build_dir / f'{project_name}.pakfs'
+        fs_dir = root / 'filesystem'
+        fs_dir.mkdir(exist_ok=True)
+        pakfs_file = fs_dir / pakfs_name
         pakfs_file.write_bytes(pack(packable))
-        print(f'  Packed {len(packable)} asset(s) -> {pakfs_file.relative_to(root)}')
+        print(f'  Packed {len(packable)} asset(s) -> filesystem/{pakfs_name}')
 
-    print(f'Build complete. Generated {len(c_files)} C file(s) in {build_dir.relative_to(root)}/')
+    # ── 4. Generate Makefile ─────────────────────────────────────────────
+    from .makefile_gen import generate_makefile
+    makefile = generate_makefile(
+        project_name=project_name,
+        rom_title=rom_title,
+        c_files=c_rel_paths,
+        pakfs_archive=pakfs_name if has_assets else None,
+        save_type=save_type,
+        bit_depth=bit_depth,
+        resolution=resolution,
+        framebuffers=framebuffers,
+        optimization=optimization,
+        use_tiny3d=use_tiny3d,
+        project_root=root,
+    )
+    makefile_path = root / 'Makefile'
+    makefile_path.write_text(makefile, encoding='utf-8')
+    print(f'  Generated Makefile')
+
     print()
-    print('Note: To produce a .z64 ROM, run the generated C files through')
-    print('      a libdragon Makefile in your N64 development environment.')
-    print('      Assets are packed into a PakFS archive (pak:/ protocol).')
+    print(f'Build complete. Next steps:')
+    print(f'  1. Set N64_INST to your libdragon installation (export N64_INST=/opt/libdragon)')
+    if use_tiny3d:
+        print(f'  2. Set TINY3D_INST to your Tiny3D installation')
+        print(f'  3. Run: make')
+    else:
+        print(f'  2. Run: make')
+    print(f'  3. Run: make run   (launches in ares emulator)')
 
 
 def cmd_check(args):
     """Type-check without building."""
     root = find_project_root()
     if root is None:
-        # Try current file if given
-        if args.files:
+        if getattr(args, 'files', None):
             for f in args.files:
                 pak_file = Path(f)
                 try:
@@ -121,9 +183,10 @@ def cmd_check(args):
         print('error: no pak.toml found', file=sys.stderr)
         sys.exit(1)
 
-    src_files = list(root.glob('**/*.pak'))
+    src_files = [f for f in root.glob('**/*.pak')
+                 if 'build' not in f.parts]
     errors = 0
-    for pak_file in src_files:
+    for pak_file in sorted(src_files):
         try:
             compile_file(pak_file)
             print(f'  {pak_file.relative_to(root)}: ok')
@@ -138,34 +201,34 @@ def cmd_check(args):
 
 
 def cmd_explain(args):
-    """Show generated C with hardware comments."""
+    """Show generated C for a .pak file."""
     pak_file = Path(args.file)
     if not pak_file.exists():
         print(f'error: file not found: {pak_file}', file=sys.stderr)
         sys.exit(1)
-
     c_source, _ = compile_file(pak_file)
     print(c_source)
 
 
 def cmd_run(args):
-    """Build and launch in emulator."""
+    """Build, then invoke `make run`."""
     cmd_build(args)
-    # Try to find ares emulator
-    ares = 'ares'
     root = find_project_root()
-    if root:
-        toml_path = root / 'pak.toml'
-        with open(toml_path, 'rb') as f:
-            config = tomllib.load(f)
-        project_name = config.get('project', {}).get('name', 'game')
-        rom = root / 'build' / f'{project_name}.z64'
-        if rom.exists():
-            print(f'Launching {rom.name} in emulator...')
-            subprocess.run([ares, str(rom)])
-        else:
-            print(f'Note: ROM not yet produced ({project_name}.z64).')
-            print('      Run through libdragon Makefile to produce the ROM, then launch with ares.')
+    if root and (root / 'Makefile').exists():
+        print('Running: make run')
+        subprocess.run(['make', 'run'], cwd=root)
+
+
+def cmd_pack(args):
+    """Pack a directory of assets into a PakFS archive."""
+    from .pakfs import pack_directory
+    src = Path(args.source)
+    out = Path(args.output)
+    if not src.is_dir():
+        print(f'error: {src} is not a directory', file=sys.stderr)
+        sys.exit(1)
+    count = pack_directory(src, out)
+    print(f'Packed {count} file(s) into {out}')
 
 
 def cmd_init(args):
@@ -182,7 +245,7 @@ def cmd_init(args):
     (project_dir / 'assets' / 'sprites').mkdir()
     (project_dir / 'assets' / 'audio').mkdir()
 
-    # pak.toml
+    # ── pak.toml ──────────────────────────────────────────────────────────
     (project_dir / 'pak.toml').write_text(f'''\
 [project]
 name = "{name}"
@@ -205,40 +268,57 @@ tiny3d = false
 optimization = "debug"
 ''', encoding='utf-8')
 
-    # main.pak
+    # ── src/main.pak ─────────────────────────────────────────────────────
     (project_dir / 'src' / 'main.pak').write_text(f'''\
--- {name} - created with pak init
+-- {name}
+-- Created with: pak init {name}
 
 use n64.display
 use n64.controller
 use n64.rdpq
 
 entry {{
-    -- Initialize display
+    -- Initialize display: 320x240, 16bpp, triple-buffered
     display.init(RESOLUTION_320x240, DEPTH_16_BPP, 3, GAMMA_NONE, FILTERS_RESAMPLE)
 
     loop {{
-        -- Read controller input
         let input = controller.read(0)
 
         -- Begin frame
         let disp = display.get()
         rdpq.attach_clear(disp, none)
 
-        -- Your game logic here
+        -- ── Game logic here ─────────────────────────────────────────────
 
         rdpq.detach_show()
     }}
 }}
 ''', encoding='utf-8')
 
-    print(f'Created project {name!r}')
+    # ── Copy runtime ─────────────────────────────────────────────────────
+    rt_src = runtime_dir()
+    if rt_src.exists():
+        rt_dst = project_dir / 'runtime'
+        shutil.copytree(rt_src, rt_dst)
+
+    # ── .gitignore ────────────────────────────────────────────────────────
+    (project_dir / '.gitignore').write_text('''\
+build/
+filesystem/
+Makefile
+*.z64
+*.elf
+''', encoding='utf-8')
+
+    print(f"Created project '{name}'")
     print(f'  {name}/pak.toml')
     print(f'  {name}/src/main.pak')
+    print(f'  {name}/runtime/       (PakFS C runtime)')
     print()
-    print(f'Next steps:')
+    print('Next steps:')
     print(f'  cd {name}')
-    print(f'  pak build')
+    print(f'  export N64_INST=/opt/libdragon   # or wherever libdragon is installed')
+    print(f'  pak build && make')
 
 
 def cmd_clean(args):
@@ -247,13 +327,31 @@ def cmd_clean(args):
     if root is None:
         print('error: no pak.toml found', file=sys.stderr)
         sys.exit(1)
-    import shutil
-    build_dir = root / 'build'
-    if build_dir.exists():
-        shutil.rmtree(build_dir)
-        print('Cleaned build directory.')
+    removed = []
+    for target in ['build', 'filesystem']:
+        d = root / target
+        if d.exists():
+            shutil.rmtree(d)
+            removed.append(str(d.relative_to(root)))
+    for target in ['Makefile']:
+        f = root / target
+        if f.exists():
+            f.unlink()
+            removed.append(target)
+    # Remove generated .z64 / .elf
+    for pat in ['*.z64', '*.elf']:
+        for f in root.glob(pat):
+            f.unlink()
+            removed.append(f.name)
+    if removed:
+        print('Cleaned: ' + ', '.join(removed))
     else:
         print('Nothing to clean.')
+
+
+def cmd_runtime_dir(args):
+    """Print the path to the bundled runtime (used by generated Makefile)."""
+    print(runtime_dir())
 
 
 def main():
@@ -266,7 +364,7 @@ def main():
     sub = parser.add_subparsers(dest='command', metavar='COMMAND')
 
     # build
-    p_build = sub.add_parser('build', help='Compile to C (and .z64 ROM with libdragon)')
+    p_build = sub.add_parser('build', help='Compile .pak to C, pack assets, generate Makefile')
     p_build.add_argument('-v', '--verbose', action='store_true')
     p_build.set_defaults(func=cmd_build)
 
@@ -276,12 +374,12 @@ def main():
     p_check.set_defaults(func=cmd_check)
 
     # explain
-    p_explain = sub.add_parser('explain', help='Show generated C with hardware comments')
-    p_explain.add_argument('file', help='.pak file to explain')
+    p_explain = sub.add_parser('explain', help='Show generated C for a .pak file')
+    p_explain.add_argument('file', help='.pak file')
     p_explain.set_defaults(func=cmd_explain)
 
     # run
-    p_run = sub.add_parser('run', help='Build and launch in Ares emulator')
+    p_run = sub.add_parser('run', help='Build then `make run` (launches in ares)')
     p_run.add_argument('-v', '--verbose', action='store_true')
     p_run.set_defaults(func=cmd_run)
 
@@ -291,8 +389,18 @@ def main():
     p_init.set_defaults(func=cmd_init)
 
     # clean
-    p_clean = sub.add_parser('clean', help='Remove build artifacts')
+    p_clean = sub.add_parser('clean', help='Remove build artifacts and generated Makefile')
     p_clean.set_defaults(func=cmd_clean)
+
+    # pack
+    p_pack = sub.add_parser('pack', help='Pack an asset directory into a PakFS archive')
+    p_pack.add_argument('source', help='Source directory')
+    p_pack.add_argument('--output', '-o', required=True, help='Output .pakfs file')
+    p_pack.set_defaults(func=cmd_pack)
+
+    # runtime-dir (internal, used by generated Makefile)
+    p_rtdir = sub.add_parser('--runtime-dir', help=argparse.SUPPRESS)
+    p_rtdir.set_defaults(func=cmd_runtime_dir)
 
     args = parser.parse_args()
     if args.command is None:
