@@ -163,18 +163,41 @@ class RegAlloc:
     _free_fsaved:  list = field(default_factory=lambda: list(_CALLEE_SAVED_FPRS))
     _used_saved:   set  = field(default_factory=set)
     _used_fsaved:  set  = field(default_factory=set)
+    _promoted_saved:  set = field(default_factory=set)   # saved GPRs lent as temps
+    _promoted_fsaved: set = field(default_factory=set)   # saved FPRs lent as ftemps
     _next_spill:   int  = 0     # offset from $fp, grows downward
 
     # ── GPR allocation ────────────────────────────────────────────────────────
 
     def alloc_temp(self) -> Optional[str]:
-        """Allocate a caller-saved GPR temporary. Returns None if exhausted."""
-        return self._free_temps.pop() if self._free_temps else None
+        """Allocate a caller-saved GPR temporary.
+
+        Falls back to a callee-saved register when the caller-saved pool is
+        exhausted, so callers rarely see *None*.
+        """
+        if self._free_temps:
+            return self._free_temps.pop()
+        # Fallback: promote a callee-saved register to temporary use.
+        if self._free_saved:
+            reg = self._free_saved.pop()
+            self._used_saved.add(reg)
+            self._promoted_saved.add(reg)
+            return reg
+        return None
 
     def free_temp(self, reg: str) -> None:
-        """Return a caller-saved GPR to the pool."""
-        if reg not in self._free_temps:
-            self._free_temps.append(reg)
+        """Return a caller-saved GPR to the pool.
+
+        If *reg* was promoted from the callee-saved pool it is returned there
+        instead so it can be reused in either role.
+        """
+        if reg in self._promoted_saved:
+            self._promoted_saved.discard(reg)
+            if reg not in self._free_saved:
+                self._free_saved.append(reg)
+        else:
+            if reg not in self._free_temps:
+                self._free_temps.append(reg)
 
     def alloc_saved(self) -> Optional[str]:
         """Allocate a callee-saved GPR. Marks it as used (needs save/restore)."""
@@ -191,11 +214,28 @@ class RegAlloc:
     # ── FPR allocation ────────────────────────────────────────────────────────
 
     def alloc_ftemp(self) -> Optional[str]:
-        return self._free_ftemps.pop() if self._free_ftemps else None
+        """Allocate a caller-saved FPR temporary.
+
+        Falls back to a callee-saved FPR when the caller-saved pool is
+        exhausted.
+        """
+        if self._free_ftemps:
+            return self._free_ftemps.pop()
+        if self._free_fsaved:
+            reg = self._free_fsaved.pop()
+            self._used_fsaved.add(reg)
+            self._promoted_fsaved.add(reg)
+            return reg
+        return None
 
     def free_ftemp(self, reg: str) -> None:
-        if reg not in self._free_ftemps:
-            self._free_ftemps.append(reg)
+        if reg in self._promoted_fsaved:
+            self._promoted_fsaved.discard(reg)
+            if reg not in self._free_fsaved:
+                self._free_fsaved.append(reg)
+        else:
+            if reg not in self._free_ftemps:
+                self._free_ftemps.append(reg)
 
     def alloc_fsaved(self) -> Optional[str]:
         if not self._free_fsaved:

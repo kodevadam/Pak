@@ -17,6 +17,6 @@ n64_runtime - Libdragon FFI: maps n64.module.fn() → jal <symbol> with o32 ABI
 mips_codegen - Top-level orchestrator: walks AST, drives all sub-generators
 """
 
-from .mips_codegen import MipsCodegen
+from .mips_codegen import MipsCodegen, CodegenError
 
-__all__ = ["MipsCodegen"]
+__all__ = ["MipsCodegen", "CodegenError"]

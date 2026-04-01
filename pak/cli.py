@@ -12,10 +12,11 @@ from typing import Optional, List
 from .lexer import Lexer, LexError
 from .parser import Parser, ParseError, parse
 from .codegen import generate
-from .typechecker import typecheck_multi, PakError
+from .typechecker import typecheck_multi, TypeEnv, PakError
 from .checker import semantic_check, check_entry_blocks, CheckDiag
 from .headergen import generate_header, module_to_filename, collect_module_includes
 from . import ast as pak_ast
+from .mips import MipsCodegen, CodegenError
 
 
 def find_project_root(start: Path = None) -> Optional[Path]:
@@ -110,8 +111,9 @@ def cmd_build(args):
 
     verbose = getattr(args, 'verbose', False)
     no_style_warnings = getattr(args, 'no_style_warnings', False)
+    backend = getattr(args, 'backend', 'c')
 
-    print(f'Building {project_name}...')
+    print(f'Building {project_name} (backend: {backend})...')
 
     build_dir = root / 'build'
     build_dir.mkdir(exist_ok=True)
@@ -140,35 +142,13 @@ def cmd_build(args):
         print('  Tip: run `pak check` for a detailed report.', file=sys.stderr)
         sys.exit(1)
 
-    # ── 3. Generate headers for modules ──────────────────────────────────────
-    # Map: module_path → header_filename (e.g. 'game.player' → 'game_player.h')
-    module_headers: dict = {}  # module_path → header filename
-    for pak_file, program in parsed:
-        mod_path = _get_module_path(program)
-        if mod_path:
-            header_name = module_to_filename(mod_path)
-            # All headers go to build_dir root so -I$(BUILD_DIR) finds them all
-            h_file = build_dir / header_name
-            module_headers[mod_path] = header_name
-            h_source = generate_header(program, mod_path)
-            h_file.write_text(h_source, encoding='utf-8')
-            if verbose:
-                rel = pak_file.relative_to(root)
-                print(f'  Header  {rel} -> {h_file.relative_to(root)}')
-
-    # ── 4. Compile .pak → .c ─────────────────────────────────────────────────
-    c_rel_paths = []
-    for pak_file, program in parsed:
-        rel = pak_file.relative_to(root)
-        c_file = build_dir / rel.with_suffix('.c')
-        c_file.parent.mkdir(parents=True, exist_ok=True)
-
-        if verbose:
-            print(f'  Generating C for {rel}...')
-        c_source = generate(program, str(pak_file), module_headers=module_headers)
-        c_file.write_text(c_source, encoding='utf-8')
-        c_rel_paths.append(c_file.relative_to(root))
-        print(f'  Compiled {rel} -> {c_file.relative_to(root)}')
+    # ── 3–4. Code generation (backend-specific) ────────────────────────────────
+    if backend == 'mips':
+        out_rel_paths = _build_mips(parsed, root, build_dir, verbose)
+        out_ext = '.s'
+    else:
+        out_rel_paths = _build_c(parsed, root, build_dir, verbose)
+        out_ext = '.c'
 
     # ── 5. Copy runtime into project ──────────────────────────────────────────
     rt_src = runtime_dir()
@@ -225,7 +205,7 @@ def cmd_build(args):
     makefile = generate_makefile(
         project_name=project_name,
         rom_title=rom_title,
-        c_files=c_rel_paths,
+        c_files=out_rel_paths,
         pakfs_archive=pakfs_name if has_assets else None,
         save_type=save_type,
         bit_depth=bit_depth,
@@ -234,6 +214,7 @@ def cmd_build(args):
         optimization=optimization,
         use_tiny3d=use_tiny3d,
         project_root=root,
+        backend=backend,
     )
     makefile_path = root / 'Makefile'
     makefile_path.write_text(makefile, encoding='utf-8')
@@ -248,6 +229,69 @@ def cmd_build(args):
     else:
         print(f'  2. Run: make')
     print(f'  3. Run: make run   (launches in ares emulator)')
+
+
+def _build_c(parsed, root, build_dir, verbose):
+    """Generate C code and headers for all parsed programs. Returns list of relative paths."""
+    # Generate headers for modules
+    module_headers: dict = {}
+    for pak_file, program in parsed:
+        mod_path = _get_module_path(program)
+        if mod_path:
+            header_name = module_to_filename(mod_path)
+            h_file = build_dir / header_name
+            module_headers[mod_path] = header_name
+            h_source = generate_header(program, mod_path)
+            h_file.write_text(h_source, encoding='utf-8')
+            if verbose:
+                rel = pak_file.relative_to(root)
+                print(f'  Header  {rel} -> {h_file.relative_to(root)}')
+
+    # Compile .pak → .c
+    c_rel_paths = []
+    for pak_file, program in parsed:
+        rel = pak_file.relative_to(root)
+        c_file = build_dir / rel.with_suffix('.c')
+        c_file.parent.mkdir(parents=True, exist_ok=True)
+
+        if verbose:
+            print(f'  Generating C for {rel}...')
+        c_source = generate(program, str(pak_file), module_headers=module_headers)
+        c_file.write_text(c_source, encoding='utf-8')
+        c_rel_paths.append(c_file.relative_to(root))
+        print(f'  Compiled {rel} -> {c_file.relative_to(root)}')
+
+    return c_rel_paths
+
+
+def _build_mips(parsed, root, build_dir, verbose):
+    """Generate MIPS assembly for all parsed programs. Returns list of relative paths."""
+    # Run typechecker to get TypeEnv for codegen
+    tc_input = [(str(pf), prog) for pf, prog in parsed]
+    from .typechecker import typecheck_multi
+    typecheck_multi(tc_input)  # we already checked; this just gives us the env
+
+    s_rel_paths = []
+    for pak_file, program in parsed:
+        rel = pak_file.relative_to(root)
+        s_file = build_dir / rel.with_suffix('.s')
+        s_file.parent.mkdir(parents=True, exist_ok=True)
+
+        if verbose:
+            print(f'  Generating MIPS assembly for {rel}...')
+        try:
+            cg = MipsCodegen(bounds_check=True, optimize=True)
+            asm_text = cg.generate(program)
+        except CodegenError as e:
+            print(f'error[codegen]: {e}', file=sys.stderr)
+            print(f'  --> {pak_file}', file=sys.stderr)
+            sys.exit(1)
+
+        s_file.write_text(asm_text, encoding='utf-8')
+        s_rel_paths.append(s_file.relative_to(root))
+        print(f'  Compiled {rel} -> {s_file.relative_to(root)}')
+
+    return s_rel_paths
 
 
 def _run_full_check(
@@ -370,13 +414,27 @@ def cmd_check(args):
 
 
 def cmd_explain(args):
-    """Show generated C for a .pak file."""
+    """Show generated code for a .pak file."""
     pak_file = Path(args.file)
     if not pak_file.exists():
         print(f'error: file not found: {pak_file}', file=sys.stderr)
         sys.exit(1)
-    c_source, _ = compile_file(pak_file)
-    print(c_source)
+
+    backend = getattr(args, 'backend', 'c')
+    if backend == 'mips':
+        program = parse_file(pak_file)
+        if program is None:
+            sys.exit(1)
+        try:
+            cg = MipsCodegen(bounds_check=True, optimize=True)
+            asm_text = cg.generate(program)
+        except CodegenError as e:
+            print(f'error[codegen]: {e}', file=sys.stderr)
+            sys.exit(1)
+        print(asm_text)
+    else:
+        c_source, _ = compile_file(pak_file)
+        print(c_source)
 
 
 def cmd_run(args):
@@ -574,8 +632,10 @@ def main():
     sub = parser.add_subparsers(dest='command', metavar='COMMAND')
 
     # build
-    p_build = sub.add_parser('build', help='Compile .pak to C, pack assets, generate Makefile')
+    p_build = sub.add_parser('build', help='Compile .pak to C or MIPS assembly, pack assets, generate Makefile')
     p_build.add_argument('-v', '--verbose', action='store_true')
+    p_build.add_argument('--backend', choices=['c', 'mips'], default='c',
+                         help='Code generation backend (default: c)')
     p_build.add_argument('--no-style-warnings', dest='no_style_warnings',
                          action='store_true',
                          help='Suppress naming-convention warnings (W001–W003)')
@@ -590,13 +650,17 @@ def main():
     p_check.set_defaults(func=cmd_check)
 
     # explain
-    p_explain = sub.add_parser('explain', help='Show generated C for a .pak file')
+    p_explain = sub.add_parser('explain', help='Show generated code for a .pak file')
     p_explain.add_argument('file', help='.pak file')
+    p_explain.add_argument('--backend', choices=['c', 'mips'], default='c',
+                           help='Code generation backend (default: c)')
     p_explain.set_defaults(func=cmd_explain)
 
     # run
     p_run = sub.add_parser('run', help='Build then `make run` (launches in ares)')
     p_run.add_argument('-v', '--verbose', action='store_true')
+    p_run.add_argument('--backend', choices=['c', 'mips'], default='c',
+                       help='Code generation backend (default: c)')
     p_run.add_argument('--no-style-warnings', dest='no_style_warnings',
                        action='store_true',
                        help='Suppress naming-convention warnings (W001–W003)')

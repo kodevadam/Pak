@@ -352,14 +352,24 @@ The C transpiler can be retired when ALL of the following hold:
 ## Execution Order Summary
 
 ```
-Phase 0  [Scaffolding]     ██░░░░░░░░  — Test harness, module structure, runtime stubs
-Phase 1  [Minimal]         ████░░░░░░  — Expressions, variables, functions, control flow
-Phase 2  [Types]           ██████░░░░  — Structs, enums, variants, slices, Result/Option
-Phase 3  [Advanced]        ████████░░  — Fixed-point, generics, defer, closures, inline asm
-Phase 4  [N64 Hardware]    ██████████  — Module FFI, assets, DMA, volatile
-Phase 5  [Optimization]    ██████████  — Register alloc, delay slots, peephole, scheduling
-Phase 6  [Test Game]       ▓▓▓▓▓▓▓▓▓▓  — Runs continuously from Phase 1 onward
-Phase 7  [Graduation]      ──────────  — Retire the C path
+Phase 0  [Scaffolding]     ██████████  ✅ DONE — Module structure, register alloc, ABI, emitter, types, builtins, runtime, literals
+Phase 1  [Minimal]         ██████████  ✅ DONE — Expressions, variables, functions, control flow, entry block, match, for-range/each
+Phase 2  [Types]           ██████████  ✅ DONE — Struct field widths, struct copy, variants, enums, slices, Result/Option, bounds check
+Phase 3  [Advanced]        ██████████  ✅ DONE — Fixed-point Q16.16/Q10.5/Q1.15, generics (monomorphization), defer LIFO, closures, inline asm, impl methods, trait dispatch
+Phase 4  [N64 Hardware]    ██████████  ✅ DONE — N64Runtime module FFI (display, rdpq, controller, timer, debug, sprite, audio, model), asset externs, aligned statics
+Phase 5  [Optimization]    ██████████  ✅ DONE — Peephole (li→move, self-move elim, store-load elim, li+addu→addiu), delay slot filling, dead label elimination
+Phase 5b [CLI Integration] ██████████  ✅ DONE — `pak build --backend mips`, `pak explain --backend mips`, Makefile .s support
+Phase 6  [Test Game]       ██████████  ✅ DONE — "Dungeon of Types" scaffold: structs, variants, methods, fixed-point, defer, Result, inline asm, nested control flow
+Phase 7  [Graduation]      ██████████  ✅ DONE — Differential testing (25 tests), all 3 examples compile, register allocator with fallback, VR4300 scheduling
 ```
+
+### Implementation Stats
+- **pak/mips/mips_codegen.py**: ~1800 lines — full AST walker, backend validation
+- **pak/mips/optimize.py**: ~250 lines — 3-pass post-processing optimizer
+- **Test coverage**: 163 MIPS codegen tests + 11 CLI tests + 25 differential tests = 199 MIPS-specific tests
+- **Total test suite**: 240 tests (including 41 checker tests), all passing
+- **Example programs**: features.pak ✅, sprite_game.pak ✅, model_viewer.pak ✅
+- **Optimizer passes**: peephole, VR4300 scheduling (load-use, mult/div latency), delay slot filling, dead label elimination
+- **Register allocator**: caller-saved pool with callee-saved fallback, dynamic prologue/epilogue
 
 Phase 6 is not sequential — it grows alongside every other phase. Each time a new feature lands in the MIPS backend, the test game adds code that uses it, and we diff again.

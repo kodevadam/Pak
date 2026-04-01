@@ -1,0 +1,635 @@
+-- Dungeon of Types
+-- Phase 6 comprehensive test game for the MIPS transpiler.
+-- Exercises every language feature the backend must support.
+-- Used for differential testing: C path vs MIPS path.
+
+use n64.display
+use n64.controller
+use n64.rdpq
+use n64.debug
+use n64.timer
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Enums (simple + typed base)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+enum Direction {
+    north
+    south
+    east
+    west
+}
+
+enum TileType: u8 {
+    floor
+    wall
+    door
+    trap
+    stairs
+    water
+}
+
+enum GameState: u8 {
+    title
+    playing
+    inventory
+    paused
+    gameover
+    victory
+}
+
+enum ItemKind: u8 {
+    sword
+    shield
+    potion
+    key
+    scroll
+    gold
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Structs (nested, aligned, various field widths)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+struct Vec2 {
+    x: fix16.16
+    y: fix16.16
+}
+
+struct Vec2i {
+    x: i32
+    y: i32
+}
+
+struct Color {
+    r: u8
+    g: u8
+    b: u8
+    a: u8
+}
+
+struct Rect {
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+}
+
+struct Item {
+    kind: ItemKind
+    count: u8
+    power: i16
+}
+
+@aligned(16)
+struct DMABuffer {
+    data: [256]u8
+}
+
+struct Stats {
+    hp: i32
+    max_hp: i32
+    attack: i32
+    defense: i32
+    speed: fix16.16
+}
+
+struct Player {
+    pos: Vec2
+    vel: Vec2
+    tile: Vec2i
+    stats: Stats
+    facing: Direction
+    alive: bool
+    level: u8
+    xp: i32
+    inventory: [8]Item
+    inv_count: u8
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Variants (tagged unions with payloads)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+variant Enemy {
+    slime { hp: i32, speed: fix16.16 }
+    skeleton { hp: i32, attack: i32, patrol_dir: Direction }
+    boss { hp: i32, max_hp: i32, phase: u8, name_id: i32 }
+    none
+}
+
+variant DamageResult {
+    hit { damage: i32, remaining_hp: i32 }
+    miss
+    critical { damage: i32, remaining_hp: i32, multiplier: i32 }
+    blocked { absorbed: i32 }
+}
+
+variant Pickup {
+    item_drop { item: Item, pos: Vec2i }
+    gold_pile { amount: i32, pos: Vec2i }
+    health_orb { heal: i32 }
+    nothing
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Constants
+-- ═══════════════════════════════════════════════════════════════════════════
+
+const SCREEN_W: i32 = 320
+const SCREEN_H: i32 = 240
+const TILE_SIZE: i32 = 16
+const MAP_W: i32 = 20
+const MAP_H: i32 = 15
+const MAX_ENEMIES: i32 = 16
+const GRAVITY: fix16.16 = 0
+const PLAYER_SPEED: fix16.16 = 2
+const FIX_ONE: fix16.16 = 1
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Static / global state
+-- ═══════════════════════════════════════════════════════════════════════════
+
+static game_state: GameState = GameState.title
+static frame_count: i32 = 0
+
+-- Map: 20x15 tile grid stored as flat array
+static map_tiles: [300]u8 = undefined
+
+-- Enemy pool
+static enemies: [16]Enemy = undefined
+static enemy_count: i32 = 0
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Fixed-point math helpers
+-- ═══════════════════════════════════════════════════════════════════════════
+
+fn fix_mul(a: fix16.16, b: fix16.16) -> fix16.16 {
+    return a * b
+}
+
+fn fix_abs(a: fix16.16) -> fix16.16 {
+    if a < 0 {
+        return 0 - a
+    }
+    return a
+}
+
+fn int_to_fix(n: i32) -> fix16.16 {
+    return n as fix16.16
+}
+
+fn fix_to_int(f: fix16.16) -> i32 {
+    return f as i32
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Pure functions (recursion, multiple return paths)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+fn factorial(n: i32) -> i32 {
+    if n <= 1 { return 1 }
+    return n * factorial(n - 1)
+}
+
+fn fibonacci(n: i32) -> i32 {
+    if n <= 0 { return 0 }
+    if n == 1 { return 1 }
+    return fibonacci(n - 1) + fibonacci(n - 2)
+}
+
+fn clamp_i32(val: i32, lo: i32, hi: i32) -> i32 {
+    if val < lo { return lo }
+    if val > hi { return hi }
+    return val
+}
+
+fn max_i32(a: i32, b: i32) -> i32 {
+    if a > b { return a }
+    return b
+}
+
+fn min_i32(a: i32, b: i32) -> i32 {
+    if a < b { return a }
+    return b
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Error handling (Result types)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+enum LoadError: u8 {
+    not_found
+    corrupt
+    out_of_memory
+}
+
+fn load_map(level: i32) -> Result(i32, LoadError) {
+    if level < 0 {
+        return err(LoadError.not_found)
+    }
+    if level > 99 {
+        return err(LoadError.corrupt)
+    }
+    -- Fill map with floor tiles
+    let i: i32 = 0
+    while i < 300 {
+        map_tiles[i] = TileType.floor as u8
+        i = i + 1
+    }
+    -- Add walls around border
+    let x: i32 = 0
+    while x < MAP_W {
+        map_tiles[x] = TileType.wall as u8
+        map_tiles[(MAP_H - 1) * MAP_W + x] = TileType.wall as u8
+        x = x + 1
+    }
+    let y: i32 = 0
+    while y < MAP_H {
+        map_tiles[y * MAP_W] = TileType.wall as u8
+        map_tiles[y * MAP_W + MAP_W - 1] = TileType.wall as u8
+        y = y + 1
+    }
+    return ok(level)
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Impl blocks & methods
+-- ═══════════════════════════════════════════════════════════════════════════
+
+impl Player {
+    fn init() -> Player {
+        return Player {
+            pos: Vec2 { x: int_to_fix(5 * TILE_SIZE), y: int_to_fix(5 * TILE_SIZE) },
+            vel: Vec2 { x: 0, y: 0 },
+            tile: Vec2i { x: 5, y: 5 },
+            stats: Stats { hp: 100, max_hp: 100, attack: 10, defense: 5, speed: PLAYER_SPEED },
+            facing: Direction.south,
+            alive: true,
+            level: 1,
+            xp: 0,
+            inventory: undefined,
+            inv_count: 0
+        }
+    }
+
+    fn take_damage(self: *Player, amount: i32) -> DamageResult {
+        let effective = max_i32(1, amount - self.stats.defense)
+        self.stats.hp = self.stats.hp - effective
+        if self.stats.hp <= 0 {
+            self.stats.hp = 0
+            self.alive = false
+        }
+        return hit(effective, self.stats.hp)
+    }
+
+    fn heal(self: *Player, amount: i32) {
+        self.stats.hp = min_i32(self.stats.hp + amount, self.stats.max_hp)
+    }
+
+    fn add_item(self: *Player, item: Item) -> bool {
+        if self.inv_count >= 8 {
+            return false
+        }
+        self.inventory[self.inv_count as i32] = item
+        self.inv_count = self.inv_count + 1
+        return true
+    }
+
+    fn update(self: *Player, input_x: i32, input_y: i32) {
+        -- Apply input to velocity (fixed-point)
+        self.vel.x = fix_mul(int_to_fix(input_x), self.stats.speed)
+        self.vel.y = fix_mul(int_to_fix(input_y), self.stats.speed)
+
+        -- Update position
+        self.pos.x = self.pos.x + self.vel.x
+        self.pos.y = self.pos.y + self.vel.y
+
+        -- Clamp to map bounds
+        let min_x = int_to_fix(TILE_SIZE)
+        let max_x = int_to_fix((MAP_W - 2) * TILE_SIZE)
+        let min_y = int_to_fix(TILE_SIZE)
+        let max_y = int_to_fix((MAP_H - 2) * TILE_SIZE)
+
+        if self.pos.x < min_x { self.pos.x = min_x }
+        if self.pos.x > max_x { self.pos.x = max_x }
+        if self.pos.y < min_y { self.pos.y = min_y }
+        if self.pos.y > max_y { self.pos.y = max_y }
+
+        -- Update tile position
+        self.tile.x = fix_to_int(self.pos.x) / TILE_SIZE
+        self.tile.y = fix_to_int(self.pos.y) / TILE_SIZE
+
+        -- Set facing direction based on input
+        if input_x > 0 { self.facing = Direction.east }
+        if input_x < 0 { self.facing = Direction.west }
+        if input_y > 0 { self.facing = Direction.south }
+        if input_y < 0 { self.facing = Direction.north }
+    }
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Enemy AI (exercises variant match with destructuring)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+fn update_enemy(e: *Enemy, player_pos: Vec2i) {
+    match *e {
+        .slime(s) => {
+            -- Slimes move toward player slowly
+        }
+        .skeleton(sk) => {
+            -- Skeletons patrol back and forth
+        }
+        .boss(b) => {
+            -- Boss has multi-phase behavior
+        }
+        .none => {
+            -- Nothing to update
+        }
+    }
+}
+
+fn compute_damage(attacker_atk: i32, defender_def: i32, is_critical: bool) -> DamageResult {
+    if is_critical {
+        let dmg = max_i32(1, (attacker_atk * 2) - defender_def)
+        return critical(dmg, 0, 2)
+    }
+    let dmg = max_i32(1, attacker_atk - defender_def)
+    if dmg <= 0 {
+        return blocked(defender_def)
+    }
+    return hit(dmg, 0)
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Pickup system (variant construction + match)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+fn process_pickup(player: *Player, pickup: Pickup) -> bool {
+    match pickup {
+        .item_drop(drop) => {
+            return player.add_item(drop.item)
+        }
+        .gold_pile(g) => {
+            player.xp = player.xp + g.amount
+            return true
+        }
+        .health_orb(h) => {
+            player.heal(h.heal)
+            return true
+        }
+        .nothing => {
+            return false
+        }
+    }
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Map queries (exercises array indexing, bounds, casts)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+fn get_tile(x: i32, y: i32) -> TileType {
+    if x < 0 { return TileType.wall }
+    if y < 0 { return TileType.wall }
+    if x >= MAP_W { return TileType.wall }
+    if y >= MAP_H { return TileType.wall }
+    return map_tiles[y * MAP_W + x] as TileType
+}
+
+fn is_walkable(x: i32, y: i32) -> bool {
+    let t = get_tile(x, y)
+    match t {
+        .floor => { return true }
+        .door => { return true }
+        .stairs => { return true }
+        _ => { return false }
+    }
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Rendering helpers
+-- ═══════════════════════════════════════════════════════════════════════════
+
+fn draw_tile(x: i32, y: i32, tile: TileType) {
+    let sx = x * TILE_SIZE
+    let sy = y * TILE_SIZE
+
+    match tile {
+        .wall => {
+            -- Dark gray for walls
+            rdpq.set_mode_fill()
+        }
+        .floor => {
+            -- Light gray for floors
+            rdpq.set_mode_fill()
+        }
+        .door => {
+            rdpq.set_mode_fill()
+        }
+        .trap => {
+            rdpq.set_mode_fill()
+        }
+        .stairs => {
+            rdpq.set_mode_fill()
+        }
+        .water => {
+            rdpq.set_mode_fill()
+        }
+    }
+}
+
+fn draw_map() {
+    let y: i32 = 0
+    while y < MAP_H {
+        let x: i32 = 0
+        while x < MAP_W {
+            draw_tile(x, y, get_tile(x, y))
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn draw_hud(player: *Player) {
+    -- Draw HP bar at top of screen
+    let hp_width = (player.stats.hp * 100) / player.stats.max_hp
+    let bar_x: i32 = 10
+    let bar_y: i32 = 4
+
+    -- Draw level and XP
+    debug.log_value("HP: ", player.stats.hp)
+    debug.log_value("Level: ", player.level as i32)
+    debug.log_value("XP: ", player.xp)
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Defer demonstration
+-- ═══════════════════════════════════════════════════════════════════════════
+
+fn with_frame_timing() -> i32 {
+    let start = timer.ticks()
+    defer {
+        let elapsed = timer.ticks() - start
+        debug.log_value("Frame us: ", elapsed)
+    }
+
+    -- Simulate some work
+    let sum: i32 = 0
+    let i: i32 = 0
+    while i < 100 {
+        sum = sum + i
+        i = i + 1
+    }
+    return sum
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Edge cases: integer boundaries, deeply nested expressions
+-- ═══════════════════════════════════════════════════════════════════════════
+
+fn test_edge_cases() -> i32 {
+    -- Max/min 32-bit integers
+    let max_val: i32 = 2147483647
+    let min_val: i32 = -2147483648
+
+    -- Nested arithmetic
+    let deep = ((((1 + 2) * 3) - 4) / 5) + ((6 * 7) - (8 + 9))
+
+    -- Bitwise operations
+    let bits = (0xFF00 & 0x0FF0) | (0x000F ^ 0x00F0)
+    let shifted = (1 << 16) >> 8
+
+    -- Boolean logic
+    let a = true
+    let b = false
+    let c = (a and not b) or (b and not a)
+
+    return deep + bits + shifted
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Generic function (monomorphization test)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+fn identity<T>(val: T) -> T {
+    return val
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Inline assembly
+-- ═══════════════════════════════════════════════════════════════════════════
+
+fn cache_writeback_all() {
+    asm {
+        "nop"
+    }
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Function pointer / callback
+-- ═══════════════════════════════════════════════════════════════════════════
+
+fn apply_twice(f: fn(i32) -> i32, val: i32) -> i32 {
+    return f(f(val))
+}
+
+fn double(x: i32) -> i32 {
+    return x * 2
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Entry point — main game loop
+-- ═══════════════════════════════════════════════════════════════════════════
+
+entry {
+    -- Initialize N64 subsystems
+    display.init(RESOLUTION_320x240, DEPTH_16_BPP, 3, GAMMA_NONE, FILTERS_RESAMPLE)
+    debug.init_isviewer()
+
+    -- Run edge case tests at startup
+    let edge_result = test_edge_cases()
+    debug.log_value("Edge cases: ", edge_result)
+
+    -- Test recursion
+    let fact_10 = factorial(10)
+    debug.log_value("10! = ", fact_10)
+
+    -- Test function pointers
+    let doubled = apply_twice(double, 3)
+    debug.log_value("double(double(3)) = ", doubled)
+
+    -- Test generics
+    let id_int = identity<i32>(42)
+    debug.log_value("identity<i32>(42) = ", id_int)
+
+    -- Load level
+    let level_result = load_map(1)
+    match level_result {
+        ok(lvl) => {
+            debug.log_value("Loaded level: ", lvl)
+        }
+        err(e) => {
+            debug.log("Failed to load level")
+        }
+    }
+
+    -- Initialize player
+    let player = Player.init()
+
+    -- Initialize enemy pool
+    enemies[0] = slime(30, 1)
+    enemies[1] = skeleton(50, 8, Direction.east)
+    enemies[2] = boss(200, 200, 1, 0)
+    enemy_count = 3
+
+    -- Game loop
+    game_state = GameState.playing
+    loop {
+        let input = controller.read(0)
+
+        -- Begin frame
+        let disp = display.get()
+        rdpq.attach_clear(disp, none)
+
+        match game_state {
+            .playing => {
+                -- Read input
+                let dx: i32 = 0
+                let dy: i32 = 0
+
+                -- Update player
+                player.update(dx, dy)
+
+                -- Update enemies
+                let ei: i32 = 0
+                while ei < enemy_count {
+                    update_enemy(&enemies[ei], player.tile)
+                    ei = ei + 1
+                }
+
+                -- Draw
+                draw_map()
+                draw_hud(&player)
+
+                -- Frame timing with defer
+                let timing = with_frame_timing()
+            }
+            .paused => {
+                debug.log("PAUSED")
+            }
+            .gameover => {
+                debug.log("GAME OVER")
+            }
+            .title => {
+                debug.log("DUNGEON OF TYPES")
+                game_state = GameState.playing
+            }
+            _ => {
+                -- Other states handled later
+            }
+        }
+
+        rdpq.detach_show()
+        frame_count = frame_count + 1
+    }
+}
