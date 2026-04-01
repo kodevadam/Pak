@@ -231,6 +231,12 @@ class TypeChecker:
         elif isinstance(decl, ast.ExternConst):
             self.scope.declare(decl.name, decl.type)
 
+    # Heap-allocating module functions that @no_alloc must not call
+    _ALLOC_CALLS = {
+        ('mem', 'alloc'), ('mem', 'alloc_aligned'), ('mem', 'realloc'),
+        ('t3d', 'model_load'), ('t3d', 'skeleton_create'), ('t3d', 'anim_create'),
+    }
+
     def _check_fn(self, fn: ast.FnDecl):
         if not fn.body:
             return
@@ -243,7 +249,47 @@ class TypeChecker:
                 self._aligned_vars.add(p.name)
         self._check_block_stmts(fn.body.stmts)
         self.scope.pop()
+        # @no_alloc: walk body for heap allocations
+        if any(a == '@no_alloc' for a in (fn.annotations or [])):
+            self._check_no_alloc_body(fn.body, fn)
         self._current_fn = old_fn
+
+    def _check_no_alloc_body(self, block: ast.Block, fn: ast.FnDecl):
+        """Walk a function body and error on any heap-allocating calls."""
+        for stmt in block.stmts:
+            self._no_alloc_stmt(stmt, fn)
+
+    def _no_alloc_stmt(self, stmt, fn):
+        if isinstance(stmt, ast.ExprStmt):
+            self._no_alloc_expr(stmt.expr, fn)
+        elif isinstance(stmt, ast.LetDecl) and stmt.value:
+            self._no_alloc_expr(stmt.value, fn)
+        elif isinstance(stmt, ast.Return) and stmt.value:
+            self._no_alloc_expr(stmt.value, fn)
+        elif isinstance(stmt, ast.IfStmt):
+            for st in stmt.then.stmts: self._no_alloc_stmt(st, fn)
+            for _, eb in stmt.elif_branches:
+                for st in eb.stmts: self._no_alloc_stmt(st, fn)
+            if stmt.else_branch:
+                for st in stmt.else_branch.stmts: self._no_alloc_stmt(st, fn)
+        elif isinstance(stmt, (ast.WhileStmt, ast.LoopStmt, ast.ForStmt)):
+            body = stmt.body if isinstance(stmt, (ast.WhileStmt, ast.ForStmt)) else stmt.body
+            for st in body.stmts: self._no_alloc_stmt(st, fn)
+
+    def _no_alloc_expr(self, expr, fn):
+        if isinstance(expr, ast.Call):
+            if isinstance(expr.func, ast.DotAccess) and isinstance(expr.func.obj, ast.Ident):
+                key = (expr.func.obj.name, expr.func.field)
+                if key in self._ALLOC_CALLS:
+                    self.err('E501',
+                             f"'{fn.name}' is marked @no_alloc but calls '{key[0]}.{key[1]}' which allocates heap memory",
+                             expr,
+                             hint="Remove the allocation or remove the @no_alloc annotation")
+            for a in expr.args:
+                self._no_alloc_expr(a, fn)
+        elif isinstance(expr, ast.BinaryOp):
+            self._no_alloc_expr(expr.left, fn)
+            self._no_alloc_expr(expr.right, fn)
 
     def _check_block(self, block: ast.Block):
         self.scope.push()
@@ -439,10 +485,18 @@ class TypeChecker:
             self._check_expr(expr.value)
 
         elif isinstance(expr, ast.SizeOf):
-            pass  # no sub-expressions
+            pass  # no sub-expressions to check
+
+        elif isinstance(expr, ast.AlignOf):
+            pass  # operand is a type or expr; no name-resolution needed here
 
         elif isinstance(expr, ast.OffsetOf):
             pass  # no sub-expressions to check
+
+        elif isinstance(expr, ast.FmtStr):
+            for part in expr.parts:
+                if not isinstance(part, str):
+                    self._check_expr(part)
 
         elif isinstance(expr, ast.AsmExpr):
             for _, e in expr.outputs:

@@ -411,6 +411,22 @@ class AsmStmt:
     line: int = 0
     col: int = 0
 
+@dataclass
+class FmtStr:
+    """Interpolated string: "hello {name} score {score}".
+    parts is a flat list alternating str and expression nodes.
+    """
+    parts: List[Any]   # [str, expr, str, expr, ..., str]
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class AlignOf:
+    """align_of(T) — returns the alignment requirement of a type."""
+    operand: Any       # type node or expr
+    line: int = 0
+    col: int = 0
+
 
 # ── Top-level declarations ────────────────────────────────────────────────────
 

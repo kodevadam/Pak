@@ -59,6 +59,7 @@ class TT(Enum):
     CONST = auto()
     ASM = auto()
     OFFSETOF = auto()
+    ALIGNOF = auto()
 
     # Annotations
     ANNOTATION = auto()  # @something
@@ -155,6 +156,7 @@ KEYWORDS = {
     'const': TT.CONST,
     'asm': TT.ASM,
     'offsetof': TT.OFFSETOF,
+    'alignof': TT.ALIGNOF,
     '_': TT.UNDERSCORE,
 }
 

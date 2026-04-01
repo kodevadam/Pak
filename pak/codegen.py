@@ -643,6 +643,11 @@ class Codegen:
         # Ordered list of (typedef_name, inner_c_type) for fat slices — deduped
         self._slice_typedefs: List[tuple] = []
         self._slice_typedef_names: set = set()
+        # Container typedefs: (typedef_name, container_kind, elem_c_type, capacity_int)
+        self._container_typedefs: List[tuple] = []
+        self._container_typedef_names: set = set()
+        # fmt string counter for unique buffer names
+        self._fmt_counter: int = 0
         # Map of user module path → generated header filename (for cross-module includes)
         self.module_headers: dict = module_headers or {}
         # Scope stack: {name: type_node}
@@ -802,9 +807,13 @@ class Codegen:
             # Parameterized type: map List<T> → PakSlice_T, or Name_T for generics
             if t.name in ('List', 'Slice', 'Array') and len(t.args) == 1:
                 return self._slice_typedef(t.args[0])
+            # Built-in containers: FixedList(T, N), RingBuffer(T, N), FixedMap(K, V, N)
+            if t.name in ('FixedList', 'RingBuffer', 'FixedMap', 'Pool'):
+                return self._container_typedef(t)
             # Generic struct: Foo<i32, Str> → Foo_i32_Str
             c_args = '_'.join(
-                self.gen_type(a).replace(' ', '_').replace('*', 'p').replace(',', '')
+                (self.gen_expr(a) if isinstance(a, ast.IntLit) else
+                 self.gen_type(a).replace(' ', '_').replace('*', 'p').replace(',', ''))
                 for a in t.args
             )
             return f'{t.name}_{c_args}'
@@ -824,6 +833,67 @@ class Codegen:
             self._result_typedef_names.add(typedef_name)
             self._result_typedefs.append((typedef_name, c_ok, c_err))
         return typedef_name
+
+    def _container_typedef(self, t: ast.TypeGeneric) -> str:
+        """Register and return a C typedef name for a FixedList/RingBuffer/FixedMap/Pool."""
+        kind = t.name
+        if kind == 'FixedMap':
+            # FixedMap(K, V, N)
+            k_type = self.gen_type(t.args[0]) if len(t.args) > 0 else 'int32_t'
+            v_type = self.gen_type(t.args[1]) if len(t.args) > 1 else 'int32_t'
+            cap = t.args[2].value if len(t.args) > 2 and isinstance(t.args[2], ast.IntLit) else 16
+            safe_k = k_type.replace(' ', '_').replace('*', 'p')
+            safe_v = v_type.replace(' ', '_').replace('*', 'p')
+            tname = f'_PakMap_{safe_k}_{safe_v}_{cap}'
+            if tname not in self._container_typedef_names:
+                self._container_typedef_names.add(tname)
+                self._container_typedefs.append((tname, 'FixedMap', k_type, v_type, cap))
+        else:
+            # FixedList(T, N) / RingBuffer(T, N) / Pool(T, N)
+            elem_type = self.gen_type(t.args[0]) if t.args else 'int32_t'
+            cap = t.args[1].value if len(t.args) > 1 and isinstance(t.args[1], ast.IntLit) else 16
+            safe = elem_type.replace(' ', '_').replace('*', 'p')
+            prefix = {'FixedList': '_PakList', 'RingBuffer': '_PakRBuf', 'Pool': '_PakPool'}.get(kind, '_PakList')
+            tname = f'{prefix}_{safe}_{cap}'
+            if tname not in self._container_typedef_names:
+                self._container_typedef_names.add(tname)
+                self._container_typedefs.append((tname, kind, elem_type, None, cap))
+        return tname
+
+    def _emit_container_typedefs(self) -> List[str]:
+        """Emit C struct typedefs for all registered containers."""
+        lines = []
+        for entry in self._container_typedefs:
+            tname = entry[0]
+            kind = entry[1]
+            if kind == 'FixedMap':
+                _, _, k_type, v_type, cap = entry
+                lines += [
+                    f'typedef struct {{',
+                    f'    {k_type} keys[{cap}];',
+                    f'    {v_type} values[{cap}];',
+                    f'    bool occupied[{cap}];',
+                    f'    int32_t count;',
+                    f'}} {tname};',
+                ]
+            elif kind == 'RingBuffer':
+                _, _, elem_type, _, cap = entry
+                lines += [
+                    f'typedef struct {{',
+                    f'    {elem_type} data[{cap}];',
+                    f'    int32_t head, tail, count;',
+                    f'}} {tname};',
+                ]
+            else:  # FixedList / Pool
+                _, _, elem_type, _, cap = entry
+                lines += [
+                    f'typedef struct {{',
+                    f'    {elem_type} data[{cap}];',
+                    f'    int32_t len;',
+                    f'}} {tname};',
+                ]
+            lines.append('')
+        return lines
 
     def gen_array_decl(self, name: str, t) -> str:
         """Generate 'type name[size]' for array types."""
@@ -901,8 +971,29 @@ class Codegen:
             return f'({typedef_name}){{ .data = &({obj_str})[{start}], .len = {length} }}'
         if isinstance(e, ast.NamedArg):
             return self.gen_expr(e.value)
+        if isinstance(e, ast.FmtStr):
+            return self._gen_fmtstr(e)
+        if isinstance(e, ast.AlignOf):
+            op = e.operand
+            if isinstance(op, (ast.TypeName, ast.TypePointer, ast.TypeArray,
+                                ast.TypeSlice, ast.TypeResult, ast.TypeGeneric,
+                                ast.TypeVolatile)):
+                return f'__alignof__({self.gen_type(op)})'
+            return f'__alignof__({self.gen_expr(op)})'
         if isinstance(e, ast.Call):
             args_strs = [self.gen_expr(a) for a in e.args]
+            # comptime_assert(cond, msg) → _Static_assert(cond, msg)
+            if isinstance(e.func, ast.Ident) and e.func.name == 'comptime_assert':
+                cond = args_strs[0] if args_strs else 'true'
+                msg = args_strs[1] if len(args_strs) > 1 else '"assertion"'
+                return f'_Static_assert({cond}, {msg})'
+            # Static type-method calls: Vec3.zero(), Mat4.identity(), Vec3.from(...) etc.
+            if isinstance(e.func, ast.DotAccess) and isinstance(e.func.obj, ast.Ident):
+                type_name = e.func.obj.name
+                method = e.func.field
+                result = self._gen_static_type_method(type_name, method, args_strs)
+                if result is not None:
+                    return result
             # Method call: obj.method(args) → TypeName_method(&obj, args)
             if isinstance(e.func, ast.DotAccess) and isinstance(e.func.obj, ast.Ident):
                 obj_name = e.func.obj.name
@@ -932,6 +1023,16 @@ class Codegen:
                             self_arg = f'&{obj_name}'
                         all_args = [self_arg] + args_strs
                         return f'{c_fn}({", ".join(all_args)})'
+            # Built-in instance method dispatch (Vec3/Mat4/numeric/slice/container)
+            if isinstance(e.func, ast.DotAccess):
+                obj_expr = e.func.obj
+                method = e.func.field
+                obj_str = self.gen_expr(obj_expr)
+                obj_type = self._expr_type(obj_expr)
+                c_type = self.gen_type(obj_type) if obj_type else ''
+                result = self._gen_builtin_method(obj_str, c_type, method, args_strs, obj_type)
+                if result is not None:
+                    return result
             # Module API call: module.function(args) → C API
             if isinstance(e.func, ast.DotAccess) and isinstance(e.func.obj, ast.Ident):
                 mod = e.func.obj.name
@@ -1086,6 +1187,285 @@ class Codegen:
             lines.append('')
         return lines
 
+    # ── Format string helper ──────────────────────────────────────────────────
+
+    _FMT_SPEC = {
+        'int8_t': '%d', 'int16_t': '%d', 'int32_t': '%ld', 'int64_t': '%lld',
+        'uint8_t': '%u', 'uint16_t': '%u', 'uint32_t': '%lu', 'uint64_t': '%llu',
+        'float': '%f', 'double': '%lf', 'bool': '%d',
+        'PakStr': '%.*s',
+    }
+
+    def _fmt_spec_for_expr(self, expr) -> str:
+        """Pick a printf format specifier for an interpolated expression."""
+        t = self._expr_type(expr)
+        if t:
+            c = self.gen_type(t)
+            spec = self._FMT_SPEC.get(c)
+            if spec:
+                return spec
+            if c.endswith('*') or c == 'const char *':
+                return '%s'
+        # Fallback: treat as int
+        return '%ld'
+
+    def _fmt_arg_for_expr(self, expr, spec: str) -> str:
+        """Wrap expression for printf (e.g., (long) cast for %ld)."""
+        c = self.gen_expr(expr)
+        if spec == '%ld':
+            return f'(long)({c})'
+        if spec == '%lld':
+            return f'(long long)({c})'
+        if spec in ('%lu', '%llu'):
+            return f'(unsigned long)({c})'
+        if spec == '%.*s':
+            # PakStr: pass len then data
+            return f'({c}).len, ({c}).data'
+        return c
+
+    def _gen_fmtstr(self, e: ast.FmtStr) -> str:
+        """Emit a GCC statement expression that snprintf's into a static buffer."""
+        fmt_parts = []
+        arg_parts = []
+        for part in e.parts:
+            if isinstance(part, str):
+                # Escape the literal part for C string
+                escaped = part.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                fmt_parts.append(escaped)
+            else:
+                spec = self._fmt_spec_for_expr(part)
+                fmt_parts.append(spec)
+                arg_parts.append(self._fmt_arg_for_expr(part, spec))
+        fmt_str = ''.join(fmt_parts)
+        n = self._fmt_counter
+        self._fmt_counter += 1
+        buf = f'_pak_fmt_{n}'
+        args = (', ' + ', '.join(arg_parts)) if arg_parts else ''
+        return (f'({{ static char {buf}[256];'
+                f' snprintf({buf}, 256, "{fmt_str}"{args});'
+                f' (const char*){buf}; }})')
+
+    # ── Static type-method dispatch ───────────────────────────────────────────
+
+    _VEC3_ZERO = '(T3DVec3){{0.0f, 0.0f, 0.0f}}'
+    _VEC2_ZERO = '(T3DVec2){{0.0f, 0.0f}}'
+    _VEC4_ZERO = '(T3DVec4){{0.0f, 0.0f, 0.0f, 0.0f}}'
+
+    def _gen_static_type_method(self, type_name: str, method: str,
+                                 args: List[str]) -> Optional[str]:
+        """Handle Type.static_method() calls. Returns None if not handled."""
+        # Vec3 / Vec2 / Vec4 statics
+        if type_name in ('Vec3', 'T3DVec3'):
+            if method == 'zero':    return self._VEC3_ZERO
+            if method == 'up':      return '(T3DVec3){{0.0f, 1.0f, 0.0f}}'
+            if method == 'right':   return '(T3DVec3){{1.0f, 0.0f, 0.0f}}'
+            if method == 'forward': return '(T3DVec3){{0.0f, 0.0f, -1.0f}}'
+            if method == 'one':     return '(T3DVec3){{1.0f, 1.0f, 1.0f}}'
+            if method == 'from' and len(args) == 3:
+                return f'(T3DVec3){{{{{args[0]}, {args[1]}, {args[2]}}}}}'
+        if type_name in ('Vec2', 'T3DVec2'):
+            if method == 'zero':  return self._VEC2_ZERO
+            if method == 'one':   return '(T3DVec2){{1.0f, 1.0f}}'
+        if type_name in ('Vec4', 'T3DVec4'):
+            if method == 'zero':  return self._VEC4_ZERO
+        # Mat4 statics
+        if type_name in ('Mat4', 'T3DMat4'):
+            if method == 'identity':
+                return 'pak_mat4_identity()'
+        # T3DMat4FP allocation (t3d.math.Mat4Fp.create())
+        if type_name in ('Mat4Fp', 'T3DMat4FP'):
+            if method == 'create':
+                return 'malloc_uncached(sizeof(T3DMat4FP))'
+        # FixedList / RingBuffer / FixedMap static init
+        if type_name in ('FixedList', 'RingBuffer', 'FixedMap', 'Pool'):
+            if method == 'init':
+                return '{0}'
+        return None
+
+    # ── Built-in instance method dispatch ────────────────────────────────────
+
+    _NUMERIC_CAST_METHODS = {
+        'as_i8': 'int8_t', 'as_i16': 'int16_t', 'as_i32': 'int32_t', 'as_i64': 'int64_t',
+        'as_u8': 'uint8_t', 'as_u16': 'uint16_t', 'as_u32': 'uint32_t', 'as_u64': 'uint64_t',
+        'as_f32': 'float', 'as_f64': 'double', 'as_bool': 'bool',
+        'as_byte': 'uint8_t',
+    }
+    _FIXPOINT_CAST = {
+        'as_fix16_16': '(int32_t)(({val}) * 65536.0f)',
+        'as_fix10_5':  '(int16_t)(({val}) * 32.0f)',
+        'as_fix1_15':  '(int16_t)(({val}) * 32768.0f)',
+    }
+    _VEC3_INSTANCE = {
+        'add':        'pak_vec3_add({obj}, {a0})',
+        'sub':        'pak_vec3_sub({obj}, {a0})',
+        'scale':      'pak_vec3_scale({obj}, {a0})',
+        'normalize':  'pak_vec3_normalize({obj})',
+        'length':     'pak_vec3_length({obj})',
+        'dot':        'pak_vec3_dot({obj}, {a0})',
+        'cross':      'pak_vec3_cross({obj}, {a0})',
+        'distance_to':'pak_vec3_distance({obj}, {a0})',
+        'direction_to':'pak_vec3_direction({obj}, {a0})',
+        'negate':     'pak_vec3_scale({obj}, -1.0f)',
+    }
+    _VEC2_INSTANCE = {
+        'add':      'pak_vec2_add({obj}, {a0})',
+        'sub':      'pak_vec2_sub({obj}, {a0})',
+        'scale':    'pak_vec2_scale({obj}, {a0})',
+        'length':   'pak_vec2_length({obj})',
+    }
+    _MAT4_INSTANCE = {
+        'rotate_y':     'pak_mat4_rotate_y(&({obj}), {a0})',
+        'rotate_x':     'pak_mat4_rotate_x(&({obj}), {a0})',
+        'rotate_z':     'pak_mat4_rotate_z(&({obj}), {a0})',
+        'set_position': 'pak_mat4_set_position(&({obj}), {a0})',
+        'translate':    'pak_mat4_translate(&({obj}), {a0}, {a1}, {a2})',
+        'scale':        'pak_mat4_scale_uniform(&({obj}), {a0})',
+        'to_fixed':     't3d_mat4_to_fixed({a0}, &({obj}))',
+        'as_t3d':       'pak_mat4_to_fp_alloc(&({obj}))',
+        'identity':     't3d_mat4_identity(&({obj}))',
+    }
+
+    # Vec3/Mat4 C type aliases that count as Vec3/Mat4
+    _VEC3_CTYPES = {'T3DVec3', 'T3DVec3 *'}
+    _VEC2_CTYPES = {'T3DVec2', 'T3DVec2 *'}
+    _MAT4_CTYPES = {'T3DMat4', 'T3DMat4 *'}
+
+    # Known Vec3 method names: if receiver type is unknown but method is a known
+    # Vec3 method, still dispatch (handles chained calls like pos.add(v).normalize())
+    _KNOWN_VEC3_METHODS = set(_VEC3_INSTANCE.keys())
+
+    def _gen_builtin_method(self, obj: str, c_type: str, method: str,
+                             args: List[str], obj_type) -> Optional[str]:
+        """Dispatch built-in method calls. Returns None if not handled."""
+        a = args  # shorthand
+
+        # ── Numeric cast methods ──────────────────────────────────────────────
+        if method in self._NUMERIC_CAST_METHODS:
+            ct = self._NUMERIC_CAST_METHODS[method]
+            return f'({ct})({obj})'
+        if method in self._FIXPOINT_CAST:
+            tmpl = self._FIXPOINT_CAST[method]
+            return tmpl.replace('{val}', obj)
+
+        # ── Fixed-point integer/fraction extraction ───────────────────────────
+        if method == 'integer':
+            return f'(int32_t)(({obj}) >> 16)'   # assumes fix16.16
+        if method == 'fraction':
+            return f'((float)(({obj}) & 0xFFFF) / 65536.0f)'
+
+        # ── .clamp(min, max) on any numeric ──────────────────────────────────
+        if method == 'clamp' and len(a) == 2:
+            return f'(({obj}) < ({a[0]}) ? ({a[0]}) : ({obj}) > ({a[1]}) ? ({a[1]}) : ({obj}))'
+
+        # ── Slice / array methods ─────────────────────────────────────────────
+        if method in ('as_slice', 'as_slice_mut'):
+            # Works for arrays: arr.as_slice()
+            if isinstance(obj_type, ast.TypeArray):
+                inner_t = obj_type.inner
+                td = self._slice_typedef(inner_t)
+                size = self.gen_expr(obj_type.size)
+                return f'({td}){{.data = ({obj}), .len = (int32_t)({size})}}'
+            # Fallback for any array-like
+            return f'({{ __auto_type _arr = &({obj})[0]; (void*)_arr; }})'
+        if method == 'get_unchecked' and len(a) == 1:
+            if isinstance(obj_type, ast.TypeSlice):
+                return f'({obj}).data[{a[0]}]'
+            return f'({obj})[{a[0]}]'
+        # .len as field is handled by dot-access; .len() as method:
+        if method == 'len' and not a:
+            if isinstance(obj_type, ast.TypeSlice):
+                return f'({obj}).len'
+            if isinstance(obj_type, ast.TypeArray):
+                return f'(int32_t)(sizeof({obj})/sizeof(({obj})[0]))'
+            return f'({obj}).len'
+
+        # ── Free on T3DMat4FP* (mat_fp.free()) ───────────────────────────────
+        if method == 'free' and not a:
+            if c_type in ('T3DMat4FP *', 'T3DMat4FP*'):
+                return f'free_uncached({obj})'
+            if c_type in ('T3DModel *', 'T3DModel*'):
+                return f't3d_model_free({obj})'
+
+        # ── Vec3 instance methods ─────────────────────────────────────────────
+        if c_type in self._VEC3_CTYPES or method in self._KNOWN_VEC3_METHODS:
+            if method in self._VEC3_INSTANCE:
+                tmpl = self._VEC3_INSTANCE[method]
+                a0 = a[0] if a else '0'
+                a1 = a[1] if len(a) > 1 else '0'
+                a2 = a[2] if len(a) > 2 else '0'
+                return tmpl.format(obj=obj, a0=a0, a1=a1, a2=a2)
+
+        # ── Vec2 instance methods ─────────────────────────────────────────────
+        if c_type in self._VEC2_CTYPES:
+            if method in self._VEC2_INSTANCE:
+                tmpl = self._VEC2_INSTANCE[method]
+                a0 = a[0] if a else '0'
+                return tmpl.format(obj=obj, a0=a0)
+
+        # ── Mat4 instance methods ─────────────────────────────────────────────
+        if c_type in self._MAT4_CTYPES:
+            if method in self._MAT4_INSTANCE:
+                tmpl = self._MAT4_INSTANCE[method]
+                a0 = a[0] if a else '0'
+                a1 = a[1] if len(a) > 1 else '0'
+                a2 = a[2] if len(a) > 2 else '0'
+                return tmpl.format(obj=obj, a0=a0, a1=a1, a2=a2)
+
+        # ── FixedList / Pool instance methods ─────────────────────────────────
+        if isinstance(obj_type, ast.TypeGeneric) and obj_type.name in ('FixedList', 'Pool'):
+            cap = obj_type.args[1].value if len(obj_type.args) > 1 else 0
+            if method == 'init':
+                return f'memset(&({obj}), 0, sizeof({obj}))'
+            if method == 'push' and a:
+                return (f'(({obj}).len < {cap} ? '
+                        f'(({obj}).data[({obj}).len++] = ({a[0]}), 1) : 0)')
+            if method == 'pop':
+                return f'({obj}).data[--({obj}).len]'
+            if method == 'remove' and a:
+                idx = a[0]
+                return (f'({{ int32_t _ri = ({idx}); '
+                        f'({obj}).data[_ri] = ({obj}).data[--({obj}).len]; }})')
+            if method in ('items', 'slice'):
+                elem_t = obj_type.args[0] if obj_type.args else ast.TypeName(name='auto')
+                td = self._slice_typedef(elem_t)
+                return f'({td}){{.data = ({obj}).data, .len = ({obj}).len}}'
+            if method == 'len' and not a:
+                return f'({obj}).len'
+            if method in ('acquire',):    # Pool-specific
+                return f'pak_pool_acquire(&({obj}))'
+            if method in ('release',) and a:
+                return f'pak_pool_release(&({obj}), {a[0]})'
+
+        # ── RingBuffer instance methods ───────────────────────────────────────
+        if isinstance(obj_type, ast.TypeGeneric) and obj_type.name == 'RingBuffer':
+            cap = obj_type.args[1].value if len(obj_type.args) > 1 else 0
+            if method == 'init':
+                return f'memset(&({obj}), 0, sizeof({obj}))'
+            if method == 'push' and a:
+                return (f'({{ ({obj}).data[({obj}).tail] = ({a[0]}); '
+                        f'({obj}).tail = (({obj}).tail + 1) % {cap}; '
+                        f'if (({obj}).count < {cap}) ({obj}).count++; }})')
+            if method == 'peek_back' and a:
+                return (f'({obj}).data[(({obj}).tail - ({a[0]}) - 1 + {cap}) % {cap}]')
+            if method == 'pop':
+                return (f'({{ __auto_type _v = ({obj}).data[({obj}).head]; '
+                        f'({obj}).head = (({obj}).head + 1) % {cap}; '
+                        f'if (({obj}).count > 0) ({obj}).count--; _v; }})')
+            if method == 'len' and not a:
+                return f'({obj}).count'
+
+        # ── FixedMap instance methods ─────────────────────────────────────────
+        if isinstance(obj_type, ast.TypeGeneric) and obj_type.name == 'FixedMap':
+            cap = obj_type.args[2].value if len(obj_type.args) > 2 else 0
+            if method == 'init':
+                return f'memset(&({obj}), 0, sizeof({obj}))'
+            if method == 'set' and len(a) == 2:
+                return (f'pak_map_set(&({obj}), {cap}, {a[0]}, {a[1]})')
+            if method == 'get' and a:
+                return f'pak_map_get(&({obj}), {cap}, {a[0]})'
+
+        return None
+
     def gen_program(self, program: ast.Program) -> str:
         # First pass: collect uses, assets, fn names, enum/variant info, methods
         for decl in program.decls:
@@ -1135,6 +1515,9 @@ class Codegen:
         out_lines.append('#include <stdint.h>')
         out_lines.append('#include <stdbool.h>')
         out_lines.append('#include <string.h>')
+        out_lines.append('#include <math.h>')
+        out_lines.append('#include "pak_math.h"')
+        out_lines.append('#include "pak_containers.h"')
 
         # Module-based includes
         seen_includes = set()
@@ -1214,6 +1597,13 @@ class Codegen:
             out_lines.append('')
             for typedef_name, c_ok, c_err in self._result_typedefs:
                 out_lines.append(f'typedef struct {{ bool is_ok; union {{ {c_ok} value; {c_err} error; }} data; }} {typedef_name};')
+
+        # Container typedefs (FixedList, RingBuffer, FixedMap, Pool)
+        container_td_lines = self._emit_container_typedefs()
+        if container_td_lines:
+            out_lines.append('')
+            out_lines.append('/* -- Container types -- */')
+            out_lines.extend(container_td_lines)
 
         # Emit closures (non-capturing fn literals) as static functions
         if self._closures:
@@ -1387,8 +1777,13 @@ class Codegen:
     def gen_struct(self, s: ast.StructDecl) -> str:
         attrs = []
         for ann in s.annotations:
-            if '@packed' in ann:
-                attrs.append('__attribute__((packed))')
+            if '@packed' in ann or '@c_layout' in ann:
+                # @c_layout enforces C ABI layout (no reordering); closest C
+                # equivalent is __attribute__((packed)) if also packed, otherwise
+                # it's a no-op annotation (C structs already have C layout by default).
+                # Emit packed only when @packed is explicit; @c_layout alone is a marker.
+                if '@packed' in ann:
+                    attrs.append('__attribute__((packed))')
             elif '@aligned' in ann:
                 n = ann[ann.index('(')+1:ann.index(')')]
                 attrs.append(f'__attribute__((aligned({n})))')
@@ -1474,11 +1869,24 @@ class Codegen:
             elif ann == '@no_alloc':
                 pass  # compile-time check only
             elif ann.startswith('@export'):
-                pass  # already has the right name
+                # @export("symbol_name") — rename the function to the given C symbol
+                import re as _re
+                m = _re.search(r'@export\s*\(\s*"([^"]+)"\s*\)', ann)
+                if m:
+                    fn = fn  # closure capture; update name after attrs loop
+                    _export_name = m.group(1)
+                else:
+                    _export_name = None
 
         name = fn.name
         if prefix:
             name = f'{prefix}_{name}'
+        # Apply @export rename if present
+        try:
+            if _export_name:
+                name = _export_name
+        except NameError:
+            pass
 
         attr_str = ' '.join(attrs)
         if attr_str:
@@ -1656,20 +2064,46 @@ class Codegen:
     def _gen_catch_let(self, s: ast.LetDecl, catch: ast.CatchExpr,
                        pad: str, prefix: str, decl: str) -> str:
         """Emit a let binding whose value is a CatchExpr:
-           let x = try_call() catch e { ... }
+
+        Fallback form — handler is a single expression (no return/break):
+            let x = try_call() catch { default_val }
         Expands to:
-           ResultType _tmp = try_call();
-           if (!_tmp.is_ok) { [handler] }
-           Type x = _tmp.data.value;
+            Type x = try_call().is_ok ? try_call().data.value : default_val;
+        (but uses a temp to avoid double-evaluation)
+
+        Propagation form — handler contains return / break / explicit control flow:
+            let x = try_call() catch e { return err(e) }
+        Expands to the if/else expansion.
         """
         inner_c = self.gen_expr(catch.expr)
         tmp = f'_catch_{s.name}'
         lines = []
-        # We don't know the result type statically in all cases — use __auto_type
-        lines.append(f'{pad}__auto_type {tmp} = {inner_c};')
-        # error branch
-        lines.append(f'{pad}if (!{tmp}.is_ok) {{')
         inner_pad = pad + '    '
+
+        # Detect fallback form: handler is a single ExprStmt (not Return/Break)
+        is_fallback = False
+        fallback_expr = None
+        if isinstance(catch.handler, ast.Block):
+            stmts = [st for st in catch.handler.stmts if st is not None]
+            if len(stmts) == 1 and isinstance(stmts[0], ast.ExprStmt):
+                is_fallback = True
+                fallback_expr = self.gen_expr(stmts[0].expr)
+        elif isinstance(catch.handler, ast.ExprStmt):
+            is_fallback = True
+            fallback_expr = self.gen_expr(catch.handler.expr)
+        elif not isinstance(catch.handler, (ast.Block, ast.Return, ast.Break)):
+            # Raw expression node
+            is_fallback = True
+            fallback_expr = self.gen_expr(catch.handler)
+
+        if is_fallback and fallback_expr is not None:
+            lines.append(f'{pad}__auto_type {tmp} = {inner_c};')
+            lines.append(f'{pad}{prefix}{decl} = {tmp}.is_ok ? {tmp}.data.value : ({fallback_expr});')
+            return '\n'.join(lines)
+
+        # Propagation form
+        lines.append(f'{pad}__auto_type {tmp} = {inner_c};')
+        lines.append(f'{pad}if (!{tmp}.is_ok) {{')
         if catch.binding:
             lines.append(f'{inner_pad}__auto_type {catch.binding} = {tmp}.data.error;')
         if isinstance(catch.handler, ast.Block):

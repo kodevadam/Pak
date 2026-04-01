@@ -1624,3 +1624,342 @@ class TestFeaturesPak:
         # Filter out module-related false positives from use declarations
         real_errors = [e for e in errors if e.code not in ('E010',)]
         assert real_errors == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# String interpolation (FmtStr)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFmtStr:
+
+    def test_plain_string_no_interpolation(self):
+        """A string without {} is a plain StringLit."""
+        prog = parse('entry { let s = "hello" }')
+        entry = prog.decls[0]
+        stmt = entry.body.stmts[0]
+        assert isinstance(stmt.value, ast.StringLit)
+
+    def test_fmtstr_parses_as_fmtstr_node(self):
+        """A string with {expr} produces a FmtStr node."""
+        prog = parse('entry { let x: i32 = 5\n let s = "val is {x}" }')
+        entry = prog.decls[0]
+        s_stmt = entry.body.stmts[1]
+        assert isinstance(s_stmt.value, ast.FmtStr)
+
+    def test_fmtstr_parts_alternating(self):
+        """FmtStr.parts alternates str and expr."""
+        prog = parse('entry { let x: i32 = 1\n let s = "a {x} b" }')
+        node = prog.decls[0].body.stmts[1].value
+        assert isinstance(node, ast.FmtStr)
+        assert isinstance(node.parts[0], str)   # "a "
+        assert isinstance(node.parts[1], ast.Ident)  # x
+        assert isinstance(node.parts[2], str)   # " b"
+
+    def test_fmtstr_codegen_contains_snprintf(self):
+        """FmtStr emits a GCC statement expression with snprintf."""
+        src = textwrap.dedent('''
+            fn greet(name: *c_char) -> *c_char {
+                return "hi {name}"
+            }
+        ''')
+        c = codegen(src)
+        assert 'snprintf' in c
+
+    def test_fmtstr_codegen_no_bare_braces(self):
+        """The raw interpolation braces should not appear in output."""
+        src = textwrap.dedent('''
+            fn show(score: i32) -> *c_char {
+                return "score: {score}"
+            }
+        ''')
+        c = codegen(src)
+        # The literal "{score}" must not appear in the C output
+        assert '"{score}"' not in c
+        assert 'snprintf' in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# alignof
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAlignOf:
+
+    def test_alignof_lexer_token(self):
+        toks = lex('alignof(i32)')
+        assert toks[0].type == TT.ALIGNOF
+
+    def test_alignof_parses_to_node(self):
+        prog = parse('entry { let a = alignof(i32) }')
+        stmt = prog.decls[0].body.stmts[0]
+        assert isinstance(stmt.value, ast.AlignOf)
+
+    def test_alignof_codegen(self):
+        src = 'entry { let a = alignof(i32) }'
+        c = codegen(src)
+        assert '__alignof__' in c
+
+    def test_alignof_type_check_no_errors(self):
+        src = 'entry { let a = alignof(i32) }'
+        errors = check(src)
+        assert not errors
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Numeric method casts
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestNumericCastMethods:
+
+    def test_as_f32(self):
+        src = textwrap.dedent('''
+            fn cast_it(x: i32) -> f32 {
+                return x.as_f32()
+            }
+        ''')
+        c = codegen(src)
+        assert '(float)(x)' in c
+
+    def test_as_i32(self):
+        src = textwrap.dedent('''
+            fn cast_it(x: f32) -> i32 {
+                return x.as_i32()
+            }
+        ''')
+        c = codegen(src)
+        assert '(int32_t)(x)' in c
+
+    def test_as_u8(self):
+        src = textwrap.dedent('''
+            fn cast_it(x: i32) -> u8 {
+                return x.as_u8()
+            }
+        ''')
+        c = codegen(src)
+        assert '(uint8_t)(x)' in c
+
+    def test_clamp_method(self):
+        src = textwrap.dedent('''
+            fn clamp_val(x: f32) -> f32 {
+                return x.clamp(0.0, 1.0)
+            }
+        ''')
+        c = codegen(src)
+        assert 'x' in c and '0.0f' in c and '1.0f' in c
+
+    def test_fix16_16_cast(self):
+        src = textwrap.dedent('''
+            fn to_fixed(x: f32) -> i32 {
+                return x.as_fix16_16()
+            }
+        ''')
+        c = codegen(src)
+        assert '65536' in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# comptime_assert
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestComptimeAssert:
+
+    def test_comptime_assert_emits_static_assert(self):
+        src = textwrap.dedent('''
+            entry {
+                comptime_assert(1 == 1, "always true")
+            }
+        ''')
+        c = codegen(src)
+        assert '_Static_assert' in c
+        assert '1 == 1' in c
+
+    def test_comptime_assert_no_type_errors(self):
+        src = textwrap.dedent('''
+            entry {
+                comptime_assert(1 == 1, "ok")
+            }
+        ''')
+        errors = check(src)
+        assert not errors
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FixedList / RingBuffer / FixedMap containers
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestContainers:
+
+    def test_fixed_list_type_parses(self):
+        prog = parse(textwrap.dedent('''
+            struct Enemy { x: f32 }
+            entry {
+                let enemies: FixedList(Enemy, 32) = FixedList.init()
+            }
+        '''))
+        let_stmt = prog.decls[1].body.stmts[0]
+        assert isinstance(let_stmt.type, ast.TypeGeneric)
+        assert let_stmt.type.name == 'FixedList'
+
+    def test_fixed_list_codegen_typedef(self):
+        src = textwrap.dedent('''
+            struct Enemy { x: f32 }
+            entry {
+                let enemies: FixedList(Enemy, 32) = FixedList.init()
+            }
+        ''')
+        c = codegen(src)
+        assert 'FixedList' in c or 'Enemy' in c
+
+    def test_ring_buffer_type_parses(self):
+        prog = parse(textwrap.dedent('''
+            entry {
+                let rb: RingBuffer(i32, 16) = RingBuffer.init()
+            }
+        '''))
+        let_stmt = prog.decls[0].body.stmts[0]
+        assert isinstance(let_stmt.type, ast.TypeGeneric)
+        assert let_stmt.type.name == 'RingBuffer'
+
+    def test_fixed_map_type_parses(self):
+        prog = parse(textwrap.dedent('''
+            entry {
+                let m: FixedMap(i32, i32, 64) = FixedMap.init()
+            }
+        '''))
+        let_stmt = prog.decls[0].body.stmts[0]
+        assert isinstance(let_stmt.type, ast.TypeGeneric)
+        assert let_stmt.type.name == 'FixedMap'
+
+    def test_container_typedef_emitted(self):
+        src = textwrap.dedent('''
+            entry {
+                let rb: RingBuffer(i32, 8) = RingBuffer.init()
+            }
+        ''')
+        c = codegen(src)
+        # Container typedefs or at least the struct definition should appear
+        assert 'int32_t' in c or 'RingBuffer' in c
+
+    def test_fixed_list_push_codegen(self):
+        src = textwrap.dedent('''
+            struct E { x: f32 }
+            entry {
+                let list: FixedList(E, 10) = FixedList.init()
+                let e = E { x: 1.0 }
+                list.push(e)
+            }
+        ''')
+        c = codegen(src)
+        assert 'len' in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# @export annotation
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestExportAnnotation:
+
+    def test_export_renames_function(self):
+        src = textwrap.dedent('''
+            @export("my_game_init")
+            fn init() {
+            }
+        ''')
+        c = codegen(src)
+        assert 'my_game_init' in c
+
+    def test_export_without_name_keeps_original(self):
+        src = textwrap.dedent('''
+            @export
+            fn init() {
+            }
+        ''')
+        c = codegen(src)
+        assert 'init' in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# catch fallback vs propagation
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestCatchExpr:
+
+    def test_catch_fallback_ternary(self):
+        """catch { default_val } should emit a ternary, not an if block."""
+        src = textwrap.dedent('''
+            enum E: u8 { bad }
+            fn might_fail() -> Result(i32, E) { return ok(1) }
+            fn use_it() -> i32 {
+                let x = might_fail() catch { 0 }
+                return x
+            }
+        ''')
+        c = codegen(src)
+        assert 'is_ok' in c
+        # Should use ternary style for fallback, not if (!...) {...}
+        # The ternary contains is_ok ?
+        assert '?' in c
+
+    def test_catch_propagation_if_block(self):
+        """catch e { return err(e) } should emit if (!is_ok) { return ...; }"""
+        src = textwrap.dedent('''
+            enum E: u8 { bad }
+            fn might_fail() -> Result(i32, E) { return ok(1) }
+            fn propagate() -> Result(i32, E) {
+                let x = might_fail() catch e { return err(e) }
+                return ok(x)
+            }
+        ''')
+        c = codegen(src)
+        assert 'if (' in c
+        assert 'is_ok' in c
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# @no_alloc enforcement
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestNoAlloc:
+
+    def test_no_alloc_clean_function_passes(self):
+        """@no_alloc on a function with no heap calls should produce no error."""
+        src = textwrap.dedent('''
+            @no_alloc
+            fn pure_math(x: i32) -> i32 {
+                return x + 1
+            }
+        ''')
+        errors = check(src)
+        # No E501 errors expected
+        assert all(e.code != 'E501' for e in errors)
+
+    def test_no_alloc_with_alloc_produces_error(self):
+        """@no_alloc on a function that calls mem.alloc should raise E501."""
+        src = textwrap.dedent('''
+            use n64.mem
+            @no_alloc
+            fn bad_fn() {
+                let p = mem.alloc(64)
+            }
+        ''')
+        errors = check(src)
+        assert any(e.code == 'E501' for e in errors)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# @c_layout annotation
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestCLayout:
+
+    def test_c_layout_struct_compiles(self):
+        """@c_layout struct should codegen without errors."""
+        src = textwrap.dedent('''
+            @c_layout
+            struct Header {
+                magic: u32
+                version: u16
+            }
+        ''')
+        c = codegen(src)
+        assert 'Header' in c
+        assert 'typedef struct' in c

@@ -463,6 +463,20 @@ class Parser:
             inner = self.parse_type()
             self.expect(TT.RPAREN)
             return ast.TypeOption(inner=inner, line=line, col=col)
+        # FixedList(T, N) / RingBuffer(T, N) / FixedMap(K, V, N) / Pool(T, N)
+        # type args may be types OR integer literals
+        if name in ('FixedList', 'RingBuffer', 'FixedMap', 'Pool') and self.check(TT.LPAREN):
+            self.advance()
+            args = []
+            while not self.check(TT.RPAREN) and not self.check(TT.EOF):
+                if self.check(TT.INT):
+                    tok2 = self.advance()
+                    args.append(ast.IntLit(value=int(tok2.value), raw=tok2.value, line=line, col=col))
+                else:
+                    args.append(self.parse_type())
+                self.match(TT.COMMA)
+            self.expect(TT.RPAREN)
+            return ast.TypeGeneric(name=name, args=args, line=line, col=col)
 
         # Generic type: Name<T, U>
         if self.check(TT.LT):
@@ -973,7 +987,7 @@ class Parser:
 
         if tok.type == TT.STRING:
             self.advance()
-            return ast.StringLit(value=tok.value, line=line, col=col)
+            return self._parse_string_or_fmtstr(tok.value, line, col)
 
         if tok.type == TT.TRUE:
             self.advance()
@@ -1041,6 +1055,21 @@ class Parser:
             val = self.parse_expr()
             self.expect(TT.RPAREN)
             return ast.ErrExpr(value=val, line=line, col=col)
+
+        # alignof(T) — alignment of a type
+        if tok.type == TT.ALIGNOF:
+            self.advance()
+            self.expect(TT.LPAREN)
+            save = self.pos
+            try:
+                operand = self.parse_type()
+                if not self.check(TT.RPAREN):
+                    raise Exception()
+            except Exception:
+                self.pos = save
+                operand = self.parse_expr()
+            self.expect(TT.RPAREN)
+            return ast.AlignOf(operand=operand, line=line, col=col)
 
         # sizeof(T) or sizeof(expr)
         if tok.type == TT.SIZEOF:
@@ -1184,6 +1213,35 @@ class Parser:
             return ast.IntLit(value=ival, raw=raw, line=line, col=col)
 
         raise ParseError(f'Unexpected token in expression', tok)
+
+    def _parse_string_or_fmtstr(self, raw: str, line: int, col: int):
+        """Parse a string literal, detecting {expr} interpolation.
+        Returns StringLit if no interpolation, FmtStr otherwise.
+        """
+        import re
+        if '{' not in raw:
+            return ast.StringLit(value=raw, line=line, col=col)
+        pattern = re.compile(r'\{([^}]+)\}')
+        parts = []
+        last = 0
+        for m in pattern.finditer(raw):
+            if m.start() > last:
+                parts.append(raw[last:m.start()])
+            expr_src = m.group(1).strip()
+            try:
+                tokens = Lexer(expr_src).tokenize()
+                sub_expr = Parser(tokens).parse_expr()
+                parts.append(sub_expr)
+            except Exception:
+                # Failed to parse: treat as literal
+                parts.append('{' + expr_src + '}')
+            last = m.end()
+        if last < len(raw):
+            parts.append(raw[last:])
+        # If every part is a string, it's just a plain StringLit
+        if all(isinstance(p, str) for p in parts):
+            return ast.StringLit(value=raw, line=line, col=col)
+        return ast.FmtStr(parts=parts, line=line, col=col)
 
     def _is_struct_literal_context(self) -> bool:
         """Heuristic: look ahead to see if { ... } looks like a struct literal.
