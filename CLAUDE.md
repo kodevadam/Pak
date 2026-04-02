@@ -5,6 +5,44 @@ Follow these instructions when working in this repository.
 
 ---
 
+## Automatic Validation (read this first)
+
+**Every `.pak` file you write or edit is automatically validated by the Pak
+compiler via a PostToolUse hook.** You do not need to run it manually.
+
+When a file fails validation, you will see output like:
+
+```
+============================================================
+PAK VALIDATION FAILED: path/to/file.pak
+============================================================
+error[E002]: 1:4: Expected identifier (got FN 'fn')
+  --> path/to/file.pak
+  help: ...
+
+Fix the errors above before proceeding.
+Reference LANGUAGE.md and NOT_SUPPORTED.md.
+============================================================
+```
+
+**When this happens:**
+1. Read the error message carefully — it includes line, column, and error code.
+2. Look up the correct construct in `LANGUAGE.md`.
+3. Check `NOT_SUPPORTED.md` if the error suggests you used something that doesn't exist.
+4. Fix the file. The hook will re-run automatically on the next write.
+5. Repeat until the hook exits cleanly (no output).
+
+**Do not move on until the file passes.** A `.pak` file that does not pass
+`pak check` is incorrect Pak code, regardless of how plausible it looks.
+
+You can also run the validator manually at any time:
+```
+tools/validate_pak.sh file.pak
+pak check file.pak
+```
+
+---
+
 ## Before Generating Any Pak Code
 
 Read these files **in order** before writing or modifying `.pak` files:
@@ -14,7 +52,8 @@ Read these files **in order** before writing or modifying `.pak` files:
 3. **`STDLIB.md`** — all builtin functions and N64 API modules. Do not invent function signatures.
 4. **`examples/canonical/`** — small, correct reference examples. Prefer patterns shown here.
 
-If a language feature is not documented in `LANGUAGE.md` and not demonstrated in `examples/canonical/`, do not use it. State uncertainty instead of guessing.
+If a language feature is not documented in `LANGUAGE.md` and not demonstrated
+in `examples/canonical/`, do not use it. State uncertainty instead of guessing.
 
 ---
 
@@ -23,22 +62,46 @@ If a language feature is not documented in `LANGUAGE.md` and not demonstrated in
 - **Use only documented syntax.** No inventing keywords, operators, or constructs.
 - **Use only documented APIs.** No inventing module names, function names, or signatures.
 - **Prefer canonical examples** as templates for structure and style.
-- **Mark implementation status.** `LANGUAGE.md` labels each feature `[IMPLEMENTED]`, `[PARTIAL]`, or `[PLANNED]`. Do not use `[PLANNED]` features in generated code.
+- **Mark implementation status.** `LANGUAGE.md` labels each feature `[IMPLEMENTED]`,
+  `[PARTIAL]`, or `[PLANNED]`. Do not use `[PLANNED]` features in generated code.
 - **Comments** use `--` (preferred) or `//`.
 - **No semicolons** except where shown — Pak is mostly newline-delimited.
 - **Entry point** is `entry { ... }`, not `main()` or `fn main`.
+- **Logical operators** are `and`, `or`, `not` — never `&&`, `||`, `!`.
+- **All casts are explicit** with `as` — no implicit numeric conversion.
+- **Null is `none`** — the keyword `null` does not exist.
 
 ## When in Doubt
 
 - Do not guess. Say "I'm not sure if Pak supports X — it's not in LANGUAGE.md."
 - Do not use Rust, Zig, or C idioms unless they appear verbatim in Pak docs.
 - If you need a feature that is `[PLANNED]`, say so and ask whether to implement a workaround.
+- If the compiler rejects your code, trust the compiler over your intuition.
+
+---
+
+## Error Code Reference
+
+When the compiler reports an error, use this table to understand it:
+
+| Code | Meaning |
+|------|---------|
+| E001 | Lex error — invalid character or unterminated string |
+| E002 | Parse error — syntax is wrong |
+| E101 | Undefined variable or function |
+| E102 | Wrong number of arguments |
+| E103 | No `entry` block found |
+| E201 | DMA used without `cache.writeback` first |
+| E202 | DMA buffer not `@aligned(16)` |
+| E301 | Non-exhaustive match — missing cases |
+| E401 | Use-after-move |
+| W001–W003 | Style warnings (naming conventions) |
 
 ---
 
 ## Quick Reference
 
-```
+```pak
 -- comment syntax
 use n64.display          -- import N64 module
 asset bg: Sprite from "bg.png"  -- load asset
