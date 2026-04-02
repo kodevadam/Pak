@@ -872,7 +872,7 @@ class Parser:
         # .variant or _ or literal or ident
         if self.check(TT.DOT):
             self.advance()
-            name = self.expect(TT.IDENT).value
+            name = self.expect_name().value   # accept keywords: .ok, .err, .none, etc.
             # .CaseName(binding, ...) — variant destructuring
             if self.check(TT.LPAREN):
                 self.advance()

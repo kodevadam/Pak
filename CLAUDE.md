@@ -41,6 +41,15 @@ tools/validate_pak.sh file.pak
 pak check file.pak
 ```
 
+For deeper verification — especially when the logic seems right but something
+feels off — use `pak explain` to see the generated C output:
+```
+pak explain file.pak
+```
+If the C looks wrong (wrong struct layout, missing operations, bad control flow),
+the Pak code has a semantic issue even if it passes `pak check`. Fix the Pak and
+re-explain until the C matches your intent.
+
 ---
 
 ## Before Generating Any Pak Code

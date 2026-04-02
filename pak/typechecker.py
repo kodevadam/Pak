@@ -755,6 +755,12 @@ class TypeChecker:
                 covered.add(pat.name)
             elif isinstance(pat, ast.DotAccess) and isinstance(pat.obj, ast.Ident):
                 covered.add(pat.field)
+            elif isinstance(pat, ast.Call) and isinstance(pat.func, ast.EnumVariantAccess):
+                # .Case(binding, ...) — payload-bearing variant arm
+                covered.add(pat.func.name)
+                for arg in pat.args:
+                    if isinstance(arg, ast.Ident) and arg.name != '_':
+                        self.scope.declare(arg.name, ast.TypeName(name='auto'))
             if isinstance(arm.body, ast.Block):
                 self._check_block_stmts(arm.body.stmts)
             self.scope.pop()

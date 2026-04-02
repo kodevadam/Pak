@@ -1,28 +1,38 @@
 -- 06_variants.pak
--- Demonstrates: variant (tagged union), match dispatch.
---
--- NOTE: Variant payload bindings in match arms (.case(x) => ...) are parsed
--- but payload-bound names are not yet tracked by the typechecker.
--- Use unit cases for dispatch, and store payload data in structs instead.
+-- Demonstrates: variant (tagged union), match with payload extraction.
 
--- Unit cases only (fully supported)
--- Note: do not use keyword names (none, ok, err, true, false) as variant cases
+-- Unit cases only
 variant Entity {
     player
     enemy
     projectile
-    empty       -- NOT 'none' — 'none' is a keyword
+    empty       -- do NOT use keyword names: none, ok, err, true, false
 }
 
--- Cases with payloads — construction works, payload binding in match is [PARTIAL]
+-- Cases with positional payloads
 variant Shape {
     circle(f32)           -- radius
     rect(f32, f32)        -- width, height
     point
 }
 
--- Dispatch on unit cases (exhaustive match works)
-fn entity_name(e: Entity) -> i32 {
+-- Cases with positional payloads
+variant Event {
+    key_press(u8)          -- key code
+    mouse_move(i32, i32)   -- x, y
+    quit
+}
+
+-- Payload bindings in match arms now work
+fn area(s: Shape) -> f32 {
+    match s {
+        .circle(r)   => { return r * r * 3.14159 }
+        .rect(w, h)  => { return w * h }
+        .point       => { return 0.0 }
+    }
+}
+
+fn entity_id(e: Entity) -> i32 {
     match e {
         .player      => { return 0 }
         .enemy       => { return 1 }
@@ -31,30 +41,23 @@ fn entity_name(e: Entity) -> i32 {
     }
 }
 
--- Dispatch with wildcard
-fn is_living(e: Entity) -> bool {
-    match e {
-        .player => { return true  }
-        .enemy  => { return true  }
-        _       => { return false }
-    }
-}
-
-static sink: i32 = 0
+static sink: f32 = 0.0
+static sink_i: i32 = 0
 
 entry {
-    let e = Entity.empty
-    sink = entity_name(e)
+    -- Construct and match with payload binding
+    sink = area(Shape.circle(5.0))    -- 78.5...
+    sink = area(Shape.rect(4.0, 3.0)) -- 12.0
+    sink = area(Shape.point)          -- 0.0
 
-    if is_living(e) { sink = 1 }
+    -- Dispatch on variant
+    sink_i = entity_id(Entity.enemy)
 
-    -- Construct variant with payload (works)
-    let s = Shape.circle(5.0)
-
-    -- Dispatch on variant (works — no payload binding)
-    match s {
-        .circle => { sink = 10 }
-        .rect   => { sink = 20 }
-        .point  => { sink = 30 }
+    -- Event with multiple payloads
+    let e = Event.mouse_move(100, 200)
+    match e {
+        .key_press(k)    => { sink_i = k as i32 }
+        .mouse_move(x, y) => { sink_i = x + y }
+        .quit            => { sink_i = -1 }
     }
 }

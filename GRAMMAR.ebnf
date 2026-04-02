@@ -1,0 +1,351 @@
+(* Pak Language Grammar — EBNF *)
+(* Generated from pak/parser.py and pak/lexer.py *)
+(*
+   Notation:
+     rule = ... ;          definition
+     a b                   sequence
+     a | b                 alternation
+     [ a ]                 optional (zero or one)
+     { a }                 zero or more
+     ( a )                 grouping
+     "token"               literal keyword or symbol
+     UPPER                 terminal token from lexer
+*)
+
+
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+(*  Top-level structure                                                        *)
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+
+program = { top_decl } ;
+
+top_decl = [ annotations ] raw_decl ;
+
+annotations = { ANNOTATION } ;
+
+(* ANNOTATION = "@ident" | "@ident(args)" e.g. @hot, @aligned(16), @cfg(DEBUG) *)
+
+raw_decl =
+    use_decl
+  | asset_decl
+  | module_decl
+  | struct_decl
+  | enum_decl
+  | variant_decl
+  | union_decl
+  | trait_decl
+  | impl_decl
+  | fn_decl
+  | entry_block
+  | extern_block
+  | const_decl
+  | static_decl
+  | let_decl
+  ;
+
+
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+(*  Import / module / asset                                                   *)
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+
+use_decl    = "use" dotted_name [ "as" IDENT ] ;
+asset_decl  = "asset" IDENT [ ":" IDENT ] "from" STRING ;
+module_decl = "module" dotted_name ;
+
+dotted_name = IDENT { "." IDENT } ;
+
+
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+(*  Type declarations                                                         *)
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+
+struct_decl = "struct" IDENT [ generic_params ] "{" { struct_field } "}" ;
+
+struct_field = [ annotations ] IDENT ":" type
+               [ ":" INT ]        (* bit-field width *)
+               [ "=" expr ]       (* default value *)
+               [ "," ] ;
+
+enum_decl = "enum" IDENT [ ":" IDENT ] "{" { enum_case } "}" ;
+
+enum_case = name_or_keyword [ "=" expr ] [ "," ] ;
+
+variant_decl = "variant" IDENT "{" { variant_case } "}" ;
+
+variant_case =
+    name_or_keyword                            (* unit case *)
+  | name_or_keyword "(" { type [ "," ] } ")"  (* positional payload *)
+  | name_or_keyword "{" { IDENT ":" type [ "," ] } "}"  (* named payload *)
+  ;
+  (* "," is optional between cases — newlines delimit *)
+
+union_decl = "union" IDENT "{" { struct_field } "}" ;
+
+trait_decl = "trait" IDENT "{" { fn_decl } "}" ;
+
+
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+(*  Impl                                                                      *)
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+
+impl_decl =
+    "impl" IDENT [ generic_params ] "for" IDENT "{" { fn_decl } "}"  (* trait impl *)
+  | "impl" IDENT [ generic_params ]             "{" { fn_decl } "}"  (* inherent impl *)
+  ;
+
+
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+(*  Functions                                                                 *)
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+
+fn_decl = [ annotations ] "fn" IDENT [ generic_params ]
+          "(" [ param_list ] ")"
+          [ "->" type ]
+          ( block | (* no body — declaration only *) ) ;
+
+param_list = param { "," param } [ "," ] ;
+
+param = [ "mut" ] name_or_keyword ":" type [ "=" expr ] ;
+
+(* 'self' is a keyword accepted as a parameter name *)
+(* First param named 'self' marks the function as a method *)
+
+entry_block = "entry" block ;
+
+generic_params = "<" IDENT { "," IDENT } ">" ;
+
+
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+(*  Extern                                                                    *)
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+
+extern_block =
+    "extern" "const" IDENT ":" type         (* extern constant / C macro *)
+  | "extern" STRING "{" { extern_item } "}" (* C FFI block *)
+  ;
+
+extern_item = fn_decl | static_decl ;
+
+
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+(*  Constants and variables                                                   *)
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+
+const_decl  = "const" IDENT [ ":" type ] "=" expr [ ";" ] ;
+static_decl = [ annotations ] "static" IDENT [ ":" type ] [ "=" expr ] ;
+let_decl    = [ annotations ] "let" [ "mut" ] IDENT [ ":" type ] [ "=" expr ] ;
+
+(* Note: "_" is NOT a valid IDENT in let — it is a keyword *)
+
+
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+(*  Types                                                                     *)
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+
+type =
+    "(" ")"                            (* unit / empty tuple *)
+  | "(" type "," { type [ "," ] } ")" (* tuple type *)
+  | "(" type ")"                       (* parenthesized type *)
+  | "dyn" IDENT                        (* trait object *)
+  | "?" "*" type                       (* nullable pointer *)
+  | "?" type                           (* Option *)
+  | "volatile" type
+  | "*" [ "volatile" ] [ "mut" ] type  (* pointer *)
+  | "[" "]" [ "mut" ] type             (* slice *)
+  | "[" expr "]" type                  (* fixed array [N]T *)
+  | "[" type ";" expr "]"              (* fixed array [T;N] Rust style *)
+  | "fn" "(" [ type { "," type } ] ")" [ "->" type ]  (* function pointer *)
+  | "Result" "(" type "," type ")"
+  | "Option" "(" type ")"
+  | container_type
+  | IDENT [ "<" type { "," type } ">" ]  (* named type, optional generic args *)
+  ;
+
+container_type =
+    "Vec"        "(" type ")"
+  | "FixedList"  "(" type "," INT ")"
+  | "RingBuffer" "(" type "," INT ")"
+  | "FixedMap"   "(" type "," type "," INT ")"
+  | "Pool"       "(" type "," INT ")"
+  ;
+
+
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+(*  Statements                                                                *)
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+
+block = "{" { stmt } "}" ;
+
+stmt =
+    let_decl
+  | static_decl
+  | "return" [ expr ]
+  | "break" [ expr ]
+  | "continue"
+  | "defer" ( block | stmt )
+  | if_stmt
+  | loop_stmt
+  | while_stmt
+  | do_while_stmt
+  | for_stmt
+  | match_stmt
+  | comptime_if
+  | asm_stmt
+  | goto_stmt
+  | label_stmt
+  | assign_stmt
+  | expr_stmt
+  | ";"                  (* optional separator *)
+  ;
+
+if_stmt      = "if" expr block { "elif" expr block } [ "else" block ] ;
+loop_stmt    = "loop" block ;
+while_stmt   = "while" expr block ;
+do_while_stmt = "do" block "while" expr ;
+for_stmt     = "for" [ IDENT "," ] IDENT "in" expr block ;
+match_stmt   = "match" expr "{" { match_arm [ "," ] } "}" ;
+comptime_if  = "comptime" "if" expr block [ "else" block ] ;
+asm_stmt     = "asm" "{" { STRING } "}" ;
+goto_stmt    = "goto" IDENT ;
+label_stmt   = IDENT ":" ;
+
+assign_stmt  = assign_target assign_op expr ;
+assign_target = expr ;  (* must be lvalue: ident, field access, index, deref *)
+assign_op   = "=" | "+=" | "-=" | "*=" | "/=" | "%="
+            | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
+
+expr_stmt = expr ;
+
+match_arm = pattern "=>" ( block | stmt ) ;
+
+pattern =
+    "." name_or_keyword                          (* .CaseName *)
+  | "." name_or_keyword "(" { pattern_binding [ "," ] } ")"  (* .Case(x, y) *)
+  | "_"                                          (* wildcard *)
+  | INT                                          (* integer literal pattern *)
+  | STRING                                       (* string literal pattern *)
+  | "true" | "false"                             (* bool literal pattern *)
+  | IDENT                                        (* variable binding / enum name *)
+  | IDENT "." IDENT [ "(" IDENT ")" ]            (* Type.Case or Type.Case(binding) *)
+  ;
+
+pattern_binding = IDENT | "_" ;
+
+(* name_or_keyword: IDENT or any keyword used as a name in this position *)
+(* This allows: .ok(v), .err(e), .none, .some(x), etc. in match patterns *)
+
+
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+(*  Expressions                                                               *)
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+
+(* Operator precedence (lowest to highest):
+   1  or
+   2  and
+   3  == != < > <= >=
+   4  |  (bitwise OR)
+   5  ^  (bitwise XOR)
+   6  &  (bitwise AND)
+   7  << >>
+   8  + -
+   9  * / %
+   10 not - ~ * &   (unary)
+   11 as             (cast)
+   12 . [] ()        (postfix)
+*)
+
+expr = expr_or ;
+
+expr_or     = expr_and    { "or"  expr_and    } ;
+expr_and    = expr_cmp    { "and" expr_cmp    } ;
+expr_cmp    = expr_bitor  { ( "==" | "!=" | "<" | ">" | "<=" | ">=" ) expr_bitor } ;
+expr_bitor  = expr_bitxor { "|"  expr_bitxor  } ;
+expr_bitxor = expr_bitand { "^"  expr_bitand  } ;
+expr_bitand = expr_shift  { "&"  expr_shift   } ;
+expr_shift  = expr_add    { ( "<<" | ">>" ) expr_add } ;
+expr_add    = expr_mul    { ( "+" | "-" ) expr_mul } ;
+expr_mul    = expr_unary  { ( "*" | "/" | "%" ) expr_unary } ;
+
+expr_unary =
+    "not" expr_unary
+  | "-"   expr_unary
+  | "~"   expr_unary
+  | "*"   expr_unary    (* dereference *)
+  | "&" [ "mut" ] expr_unary  (* address-of *)
+  | expr_cast
+  ;
+
+expr_cast = expr_postfix { "as" type } ;
+
+expr_postfix = expr_primary
+  { "." ( IDENT | INT )            (* field access / tuple access *)
+  | "[" expr "]"                    (* index *)
+  | "[" [ expr ] ".." [ expr ] "]"  (* slice *)
+  | "(" [ arg_list ] ")"            (* call *)
+  | "?" [ IDENT ] [ block ]         (* null-check / catch *)
+  } ;
+
+expr_primary =
+    INT | FLOAT | STRING | "true" | "false" | "none" | "undefined"
+  | IDENT [ "::" "<" type_list ">" ]   (* ident, optional turbofish *)
+  | "ok" "(" expr ")"
+  | "err" "(" expr ")"
+  | "alloc" "(" type [ "," expr ] ")"
+  | "free" "(" expr ")"
+  | "sizeof" "(" ( type | expr ) ")"
+  | "size_of" "(" ( type | expr ) ")"
+  | "offsetof" "(" IDENT "," IDENT ")"
+  | "alignof" "(" ( type | expr ) ")"
+  | "align_of" "(" ( type | expr ) ")"
+  | "asm" "(" STRING { ":" asm_operand_list } ")"
+  | struct_lit
+  | array_lit
+  | tuple_lit
+  | closure_lit
+  | "(" expr ")"    (* parenthesized *)
+  ;
+
+struct_lit = IDENT "{" { IDENT ":" expr [ "," ] } "}" ;
+
+array_lit  = "[" [ expr { "," expr } ] "]"
+           | "[" expr ";" expr "]" ;          (* repeat syntax *)
+
+tuple_lit  = "(" expr "," { expr [ "," ] } ")" ;
+
+closure_lit = "fn" "(" [ param_list ] ")" [ "->" type ]
+              ( block | "=" expr ) ;
+
+arg_list = arg { "," arg } [ "," ] ;
+arg = [ IDENT ":" ] expr ;    (* optional named argument *)
+
+asm_operand_list = { STRING "(" expr ")" [ "," ] } ;
+
+type_list = type { "," type } ;
+
+name_or_keyword = IDENT
+  | "ok" | "err" | "none" | "true" | "false" | "self"
+  | "in" | "as" | "from" | "do" | "loop" | "static"
+  (* any keyword that may appear as an identifier in some positions *)
+  ;
+
+
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+(*  Terminals                                                                 *)
+(* ═══════════════════════════════════════════════════════════════════════════ *)
+
+IDENT  = letter { letter | digit | "_" } ;
+INT    = digit { digit | "_" }
+       | "0x" hexdigit { hexdigit | "_" } ;
+FLOAT  = digit { digit } "." digit { digit } [ "f" ]
+       | "." digit { digit } [ "f" ] ;
+STRING = '"' { char } '"' ;    (* escape sequences: \n \t \r \\ \" \0 *)
+
+letter  = "a".."z" | "A".."Z" | "_" ;
+digit   = "0".."9" ;
+hexdigit = digit | "a".."f" | "A".."F" ;
+
+(* Comments (not tokens, stripped by lexer):
+   -- anything to end of line
+   // anything to end of line
+   No block comments.
+*)
