@@ -1,0 +1,6 @@
+-- EXPECT: E001
+-- Unterminated string literal causes a lex error.
+
+entry {
+    let s: *c_char = "unterminated
+}

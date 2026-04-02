@@ -12,14 +12,19 @@ tool input as JSON on stdin. This script:
   5. If errors are found, prints them and exits with code 2.
      Claude Code surfaces the output to Claude, which must fix the
      errors before continuing.
-  6. If clean, exits 0 silently.
+  6. If clean, runs `pak explain` and prints the generated C so Claude
+     can verify the semantics match intent, then exits 0.
 
 Exit codes:
   0 — file is valid (or not a .pak file, no action needed)
   2 — pak check failed; errors printed to stdout for Claude to read
+
+Environment variables:
+  PAK_HOOK_NO_EXPLAIN=1  — skip the pak explain step (faster, less output)
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -76,7 +81,29 @@ def main():
         print("=" * 60)
         sys.exit(2)
 
-    # Clean — exit silently
+    # Clean — optionally run pak explain for semantic verification
+    if os.environ.get("PAK_HOOK_NO_EXPLAIN") == "1":
+        sys.exit(0)
+
+    try:
+        explain = subprocess.run(
+            ["pak", "explain", str(path)],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        sys.exit(0)
+
+    if explain.returncode == 0 and explain.stdout.strip():
+        print("=" * 60)
+        print(f"PAK EXPLAIN: {path}")
+        print("=" * 60)
+        print(explain.stdout.strip())
+        print("=" * 60)
+        print("Review the generated C above. If it does not match your intent,")
+        print("fix the Pak source — the file passed pak check but may be semantically wrong.")
+        print("=" * 60)
+
     sys.exit(0)
 
 

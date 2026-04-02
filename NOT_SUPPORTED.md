@@ -333,18 +333,6 @@ variant Foo { none, ok, err }
 variant Foo { empty, success, failure }
 ```
 
-### DMA Checker False-Positives on Named Constants
-The DMA safety checker (E201/E202) fires on all arguments by name, including
-address and size arguments that are not buffers. Use inline literals for
-`rom_addr` and `size` arguments to avoid false positives.
-```
--- WRONG (checker fires on DATA_SIZE and ROM_ADDR constants):
-dma.read(&buf[0], ROM_ADDR, DATA_SIZE)
-
--- CORRECT: use inline literals
-dma.read(&buf[0], 0x10040000, 4096)
-```
-
 ### Writing Through `alloc`'d Pointer Then `free` May Fail
 The move tracker can consider a pointer consumed after a deref-write,
 making `free(ptr)` fail with E010. Keep alloc/free patterns simple.

@@ -97,7 +97,7 @@ When the compiler reports an error, use this table to understand it:
 |------|---------|
 | E001 | Lex error — invalid character or unterminated string |
 | E002 | Parse error — syntax is wrong |
-| E101 | Undefined variable or function |
+| E010 | Undefined variable or function |
 | E102 | Wrong number of arguments |
 | E103 | No `entry` block found |
 | E201 | DMA used without `cache.writeback` first |

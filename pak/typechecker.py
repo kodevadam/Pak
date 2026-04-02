@@ -339,6 +339,8 @@ class TypeChecker:
             self.scope.declare(decl.name, decl.type or ast.TypeName(name='auto'))
         elif isinstance(decl, ast.ExternConst):
             self.scope.declare(decl.name, decl.type)
+        elif isinstance(decl, ast.AssetDecl):
+            self.scope.declare(decl.name, ast.TypeName(name='auto'))
 
     # Heap-allocating module functions that @no_alloc must not call
     _ALLOC_CALLS = {
@@ -814,24 +816,28 @@ class TypeChecker:
         if (mod, fn) not in DMA_FNS:
             return
 
-        for arg in expr.args:
-            name = self._expr_base_name(arg)
-            if not name:
-                continue
+        # Only check the first argument (the buffer/pointer).
+        # Subsequent arguments (address, size, etc.) are integers — checking them
+        # produces false-positive E201/E202 when they are named constants.
+        if not expr.args:
+            return
+        name = self._expr_base_name(expr.args[0])
+        if not name:
+            return
 
-            # E201: DMA without cache writeback
-            if name not in self._cache_written and name not in self._aligned_vars:
-                self.err('E201',
-                         f"possible stale cache before DMA transfer of '{name}'",
-                         expr,
-                         hint=f"Add before the transfer: cache.writeback(&{name})")
+        # E201: DMA without cache writeback
+        if name not in self._cache_written and name not in self._aligned_vars:
+            self.err('E201',
+                     f"possible stale cache before DMA transfer of '{name}'",
+                     expr,
+                     hint=f"Add before the transfer: cache.writeback(&{name})")
 
-            # E202: Unaligned buffer
-            if name not in self._aligned_vars:
-                self.err('E202',
-                         f"buffer '{name}' may not be 16-byte aligned for DMA",
-                         expr,
-                         hint=f"Declare it with @aligned(16): @aligned(16) let {name}: ...")
+        # E202: Unaligned buffer
+        if name not in self._aligned_vars:
+            self.err('E202',
+                     f"buffer '{name}' may not be 16-byte aligned for DMA",
+                     expr,
+                     hint=f"Declare it with @aligned(16): @aligned(16) let {name}: ...")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -874,6 +880,8 @@ class TypeChecker:
         if isinstance(expr, ast.AddrOf):
             return self._expr_base_name(expr.expr)
         if isinstance(expr, ast.DotAccess):
+            return self._expr_base_name(expr.obj)
+        if isinstance(expr, ast.IndexAccess):
             return self._expr_base_name(expr.obj)
         return None
 

@@ -3,8 +3,6 @@
 --
 -- Assets are declared at the top level with `asset name: Type from "path"`.
 -- The asset name becomes a global handle usable anywhere in the file.
--- Note: asset names are resolved at link/load time, not tracked by the
--- typechecker — declare them at top level and use them directly.
 
 use n64.display
 use n64.rdpq
@@ -26,11 +24,9 @@ entry {
         rdpq.set_mode_copy()
 
         -- Assets are used by name as global handles
-        -- sprite.blit(bg_sprite, 0, 0, 0)
-        -- sprite.blit(player_sprite, 160, 120, 0)
-        -- sprite.blit(enemy_sprite, 100, 80, 0)
-        -- Note: commented out because asset names are not yet tracked
-        -- by the typechecker. In a real project they work at runtime.
+        sprite.blit(bg_sprite, 0, 0, 0)
+        sprite.blit(player_sprite, 160, 120, 0)
+        sprite.blit(enemy_sprite, 100, 80, 0)
 
         rdpq.detach_show()
     }

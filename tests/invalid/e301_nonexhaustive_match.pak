@@ -1,0 +1,17 @@
+-- EXPECT: E301
+-- Matching on an enum without covering all cases is an error.
+
+enum Direction { north, south, east, west }
+
+fn describe(d: Direction) -> i32 {
+    match d {
+        .north => { return 0 }
+        .south => { return 1 }
+        -- Missing: .east and .west
+    }
+    return -1
+}
+
+entry {
+    let x = describe(Direction.north)
+}

@@ -160,7 +160,7 @@ Key: **✅ Full** | **⚠️ Partial** | **🔲 Planned** | **❌ Known bug**
 | Trait method validation (E601) | ✅ Full | |
 | Return path checking (W201) | ✅ Full | Warning, not error |
 | Naming convention checks (W001–W003) | ✅ Full | Suppressible |
-| Asset declaration scope | ❌ Known bug | Asset names not in typechecker scope |
+| Asset declaration scope | ✅ Full | Fixed — asset names registered in typechecker scope |
 | Generic type instantiation | ⚠️ Partial | Type params tracked but not fully substituted |
 | Trait implementation completeness | ⚠️ Partial | Method existence checked; signature matching partial |
 | Result/Option type checking | ⚠️ Partial | Constructors accepted; match types partially resolved |
@@ -216,10 +216,17 @@ Key: **✅ Full** | **⚠️ Partial** | **🔲 Planned** | **❌ Known bug**
 | Bug | Workaround |
 |-----|------------|
 | `let _ = expr` — `_` is a keyword, not a valid `let` target | Assign to a named variable or static |
-| Asset names not in typechecker scope | Comments out sprite.blit calls with asset names; runtime works fine |
-| DMA checker fires on all argument names, including address/size constants | Use inline integer literals for address and size args |
 | Writing through alloc'd pointer then calling free may trigger move tracker E010 | Avoid deref-write before free; keep alloc/free simple |
 | Named-field variant construction as expression (`Event.move { x: 1 }`) | Use positional payloads: `Event.move(1, 2)` |
+
+## Recently Fixed Bugs
+
+| Bug | Fix |
+|-----|-----|
+| Asset names not in typechecker scope (E010) | Fixed — `AssetDecl` now registered in `_check_top` |
+| DMA checker fires on address/size argument names (false-positive E201/E202) | Fixed — checker now only inspects `args[0]` (the buffer); also `&buf[0]` form now detected |
+| `.ok(v)` / `.err(e)` match patterns fail to parse (E002) | Fixed — `parse_pattern()` uses `expect_name()` to accept keyword names after `.` |
+| Variant payload bindings not in scope (E010) | Fixed — `_check_match()` declares binding variables from `.Case(x, y)` arms |
 
 ---
 
