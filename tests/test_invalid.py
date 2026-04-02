@@ -5,80 +5,47 @@ Each .pak file in tests/invalid/ must contain a comment of the form:
     -- EXPECT: EXXX
 where EXXX is the error code the compiler should emit.
 
-The test runner:
-1. Runs `pak check <file>` on each test file individually.
-2. Verifies the process exits non-zero (compilation failed).
-3. Verifies the expected error code appears in stderr output.
+The test runner verifies:
+1. `pak check <file>` exits non-zero (compilation failed).
+2. The expected error code appears in stderr output.
 """
 
 import subprocess
-import sys
 import re
 from pathlib import Path
+import pytest
 
 INVALID_DIR = Path(__file__).parent / "invalid"
 EXPECT_RE = re.compile(r"--\s*EXPECT:\s*(E\d+)")
 
 
-def run_test(pak_file: Path) -> tuple[bool, str]:
-    """
-    Run pak check on a single file.
-    Returns (passed, message).
-    """
-    source = pak_file.read_text(encoding="utf-8")
-    m = EXPECT_RE.search(source)
-    if not m:
-        return False, f"SKIP — no '-- EXPECT: EXXX' annotation found"
+def _pak_files():
+    """Collect all .pak files from tests/invalid/ with their expected error code."""
+    files = []
+    for pak_file in sorted(INVALID_DIR.glob("*.pak")):
+        source = pak_file.read_text(encoding="utf-8")
+        m = EXPECT_RE.search(source)
+        if m:
+            files.append(pytest.param(pak_file, m.group(1), id=pak_file.name))
+    return files
 
-    expected_code = m.group(1)
 
+@pytest.mark.parametrize("pak_file,expected_code", _pak_files())
+def test_invalid_file_fails_with_expected_code(pak_file, expected_code):
+    """Each tests/invalid/*.pak must fail and emit the annotated error code."""
     result = subprocess.run(
         ["pak", "check", str(pak_file)],
         capture_output=True,
         text=True,
     )
 
-    # Must fail
-    if result.returncode == 0:
-        return False, f"FAIL — expected {expected_code} but compiler exited 0 (no error)"
+    assert result.returncode != 0, (
+        f"{pak_file.name}: expected compiler to fail with {expected_code}, "
+        f"but it exited 0 (no error)"
+    )
 
-    # Expected error code must appear in output
     combined = result.stdout + result.stderr
-    if expected_code not in combined:
-        # Show what was actually emitted
-        actual_codes = re.findall(r"error\[([A-Z]\d+)\]", combined)
-        actual_str = ", ".join(actual_codes) if actual_codes else "(none)"
-        return False, f"FAIL — expected {expected_code}, got: {actual_str}\n  stderr: {result.stderr.strip()[:200]}"
-
-    return True, f"PASS — {expected_code} emitted as expected"
-
-
-def main() -> int:
-    pak_files = sorted(INVALID_DIR.glob("*.pak"))
-    if not pak_files:
-        print(f"No .pak files found in {INVALID_DIR}", file=sys.stderr)
-        return 1
-
-    passed = 0
-    failed = 0
-    skipped = 0
-
-    for pak_file in pak_files:
-        ok, msg = run_test(pak_file)
-        status = "✓" if ok else ("~" if msg.startswith("SKIP") else "✗")
-        print(f"  [{status}] {pak_file.name}: {msg}")
-        if ok:
-            passed += 1
-        elif msg.startswith("SKIP"):
-            skipped += 1
-        else:
-            failed += 1
-
-    print()
-    print(f"{len(pak_files)} file(s): {passed} passed, {failed} failed, {skipped} skipped.")
-
-    return 0 if failed == 0 else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    assert expected_code in combined, (
+        f"{pak_file.name}: expected error code {expected_code} in output, "
+        f"but got:\n{combined.strip()[:400]}"
+    )

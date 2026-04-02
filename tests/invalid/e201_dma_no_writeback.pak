@@ -1,0 +1,13 @@
+-- EXPECT: E201
+-- DMA without cache.writeback first, and buffer not marked @aligned(16).
+-- Both conditions must be absent to trigger E201.
+
+use n64.dma
+
+static buf: [4096]u8 = undefined
+
+entry {
+    -- Missing: cache.writeback(buf, 4096)
+    -- Missing: @aligned(16) on buf
+    dma.read(buf, 0x10040000, 4096)
+}

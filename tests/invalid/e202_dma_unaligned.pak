@@ -1,0 +1,16 @@
+-- EXPECT: E202
+-- DMA buffer missing @aligned(16) annotation.
+-- cache.writeback is present, so E201 does not fire,
+-- but E202 fires because the buffer is not 16-byte aligned.
+
+use n64.dma
+use n64.cache
+
+static buf: [4096]u8 = undefined
+
+entry {
+    cache.writeback(buf, 4096)         -- writeback present, suppresses E201
+    dma.read(buf, 0x10040000, 4096)    -- E202: buf not @aligned(16)
+    dma.wait()
+    cache.invalidate(buf, 4096)
+}

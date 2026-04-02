@@ -1,4 +1,6 @@
 -- INVALID: exceptions.pak
+-- NOTE: This file is DOCUMENTATION ONLY. The bad code is commented out.
+-- For actual failing test cases, see tests/invalid/ (verified by pak check).
 -- Error: Pak has no exceptions. Use Result(Ok, Err).
 
 -- WRONG: no try/catch/throw/raise

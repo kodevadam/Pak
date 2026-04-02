@@ -1,4 +1,6 @@
 -- INVALID: int_match.pak
+-- NOTE: This file is DOCUMENTATION ONLY. The bad code is commented out.
+-- For actual failing test cases, see tests/invalid/ (verified by pak check).
 -- Error: match only works on enums and variants, not integers or strings.
 
 entry {

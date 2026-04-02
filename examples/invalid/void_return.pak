@@ -1,4 +1,6 @@
 -- INVALID: void_return.pak
+-- NOTE: This file is DOCUMENTATION ONLY. The bad code is commented out.
+-- For actual failing test cases, see tests/invalid/ (verified by pak check).
 -- Error: 'void' is not a type in Pak.
 -- Functions with no return value simply omit the '->' entirely.
 

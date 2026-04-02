@@ -1,4 +1,6 @@
 -- INVALID: wrong_operators.pak
+-- NOTE: This file is DOCUMENTATION ONLY. The bad code is commented out.
+-- For actual failing test cases, see tests/invalid/ (verified by pak check).
 -- Error: Pak uses 'and', 'or', 'not' — not &&, ||, !
 
 entry {
