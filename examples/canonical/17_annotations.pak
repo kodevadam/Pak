@@ -1,0 +1,42 @@
+-- 17_annotations.pak
+-- Demonstrates: @hot, @aligned, @cfg annotations.
+
+-- @hot: tells compiler to optimize this function for speed
+@hot
+fn render_scanline(fb: *u8, y: i32, color: u32) {
+    for x in 0..320 {
+        fb[y * 320 + x] = color as u8
+    }
+}
+
+-- @aligned: required for DMA buffers (must be power of 2)
+@aligned(16)
+struct DMAPacket {
+    header: u32
+    data: [60]u8
+}
+
+-- @aligned on static
+@aligned(16)
+static dma_out: [4096]u8 = undefined
+
+-- @cfg: conditional compilation
+@cfg(DEBUG_MODE)
+fn debug_dump(ptr: *u8, len: i32) {
+    -- only compiled if DEBUG_MODE is defined
+}
+
+@cfg(not(RELEASE))
+static debug_counters: [16]i32 = undefined
+
+-- Multiple annotations on one declaration
+@hot
+@aligned(8)
+struct CriticalBuffer {
+    data: [256]u8
+}
+
+entry {
+    let pkt = DMAPacket { header: 0xABCD, data: undefined }
+    let _ = pkt
+}

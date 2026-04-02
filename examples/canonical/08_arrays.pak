@@ -1,0 +1,47 @@
+-- 08_arrays.pak
+-- Demonstrates: fixed-size arrays, array indexing, passing arrays to functions.
+
+const TILE_COUNT: i32 = 64
+const MAP_W: i32 = 8
+const MAP_H: i32 = 8
+
+fn sum_array(arr: *i32, len: i32) -> i32 {
+    let mut total: i32 = 0
+    for i in 0..len {
+        total += arr[i]
+    }
+    return total
+}
+
+fn fill(arr: *i32, len: i32, value: i32) {
+    for i in 0..len {
+        arr[i] = value
+    }
+}
+
+entry {
+    -- declare fixed-size arrays
+    let mut scores: [8]i32 = undefined
+    let mut tiles: [64]u8 = undefined
+
+    -- initialize elements
+    scores[0] = 100
+    scores[1] = 200
+    scores[2] = 50
+
+    -- fill helper
+    fill(&scores[0], 8, 0)
+
+    -- read element
+    let first = scores[0]
+
+    -- array of structs pattern: use index into array
+    let tile_at_3_2 = tiles[3 * MAP_W + 2]
+
+    -- pass to function (pointer to first element)
+    let total = sum_array(&scores[0], 8)
+
+    let _ = first
+    let _ = tile_at_3_2
+    let _ = total
+}

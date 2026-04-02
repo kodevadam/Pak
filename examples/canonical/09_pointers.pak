@@ -1,0 +1,53 @@
+-- 09_pointers.pak
+-- Demonstrates: pointer types, address-of, dereference, nullable pointers.
+
+struct Node {
+    value: i32
+    next: ?*Node
+}
+
+fn double_value(ptr: *mut i32) {
+    *ptr = *ptr * 2
+}
+
+fn sum_list(head: ?*Node) -> i32 {
+    let mut total: i32 = 0
+    let mut current = head
+    while current != none {
+        total += (*current).value
+        current = (*current).next
+    }
+    return total
+}
+
+entry {
+    -- basic pointer
+    let mut x: i32 = 10
+    let ptr: *mut i32 = &mut x
+    double_value(ptr)           -- x is now 20
+
+    -- dereference
+    let val = *ptr              -- 20
+
+    -- nullable pointer
+    let maybe: ?*i32 = none
+    let also_maybe: ?*i32 = &x
+
+    -- null check (nullable pointer)
+    if maybe != none {
+        -- safe to dereference
+        let v = *maybe
+        let _ = v
+    }
+
+    -- alloc / free
+    let heap_val: *i32 = alloc(i32)
+    *heap_val = 42
+    let h = *heap_val
+    free(heap_val)
+
+    let _ = val
+    let _ = maybe
+    let _ = also_maybe
+    let _ = h
+}

@@ -1,0 +1,15 @@
+-- 20_multifile.pak
+-- Demonstrates: module declaration and cross-file structure.
+-- Status: [PARTIAL]
+--
+-- This is the main file. Companion file: 20_multifile_math.pak
+
+module main
+
+use math      -- import the math module (from 20_multifile_math.pak or similar)
+
+entry {
+    -- use functions from other modules
+    let v = math.clamp(150, 0, 100)
+    let _ = v
+}

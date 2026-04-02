@@ -1,0 +1,56 @@
+-- 05_enums.pak
+-- Demonstrates: enum declaration, enum values, match on enum.
+
+enum Direction {
+    north
+    south
+    east
+    west
+}
+
+-- enum with explicit base type
+enum GameState: u8 {
+    title
+    playing
+    paused
+    gameover
+}
+
+-- enum with explicit discriminant values
+enum ButtonMask: u8 {
+    a     = 0x80
+    b     = 0x40
+    start = 0x10
+    z     = 0x20
+}
+
+fn opposite(dir: Direction) -> Direction {
+    match dir {
+        .north => { return Direction.south }
+        .south => { return Direction.north }
+        .east  => { return Direction.west  }
+        .west  => { return Direction.east  }
+    }
+}
+
+entry {
+    let state = GameState.title
+    let dir = Direction.north
+
+    -- match must be exhaustive (covers all cases)
+    match state {
+        .title    => {}
+        .playing  => {}
+        .paused   => {}
+        .gameover => {}
+    }
+
+    -- use wildcard for "everything else"
+    match dir {
+        .north => {}
+        _      => {}    -- south, east, west
+    }
+
+    let opp = opposite(Direction.east)   -- west
+    let _ = opp
+}

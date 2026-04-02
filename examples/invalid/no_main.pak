@@ -1,0 +1,13 @@
+-- INVALID: no_main.pak
+-- Error: Pak has no fn main(). Use entry { } instead.
+
+-- WRONG:
+fn main() {
+    -- this will not compile
+    -- "main" is not a special function name in Pak
+}
+
+-- CORRECT:
+-- entry {
+--     -- program starts here
+-- }

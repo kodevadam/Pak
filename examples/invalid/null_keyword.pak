@@ -1,0 +1,18 @@
+-- INVALID: null_keyword.pak
+-- Error: 'null' is not a keyword in Pak. Use 'none'.
+
+entry {
+    -- WRONG:
+    -- let ptr: ?*i32 = null     -- 'null' does not exist
+
+    -- CORRECT:
+    let ptr: ?*i32 = none
+
+    -- WRONG:
+    -- if ptr == null { }
+
+    -- CORRECT:
+    if ptr == none { }
+
+    let _ = ptr
+}

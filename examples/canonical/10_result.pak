@@ -1,0 +1,53 @@
+-- 10_result.pak
+-- Demonstrates: Result type, ok/err constructors, match on Result.
+
+enum LoadError: u8 {
+    file_not_found
+    bad_format
+    out_of_memory
+}
+
+fn load_data(path: *c_char) -> Result(i32, LoadError) {
+    -- In real code: check if file exists, parse it, etc.
+    -- This is a simplified example.
+    if path == none {
+        return err(LoadError.file_not_found)
+    }
+    return ok(42)
+}
+
+fn parse_int(s: *c_char) -> Result(i32, LoadError) {
+    -- simplified: always succeeds here
+    return ok(0)
+}
+
+entry {
+    -- call a function that returns Result
+    let result = load_data("level1.bin")
+
+    -- handle both cases with match
+    match result {
+        .ok(data)  => {
+            -- use data
+            let _ = data
+        }
+        .err(e) => {
+            -- handle error
+            match e {
+                .file_not_found => {}
+                .bad_format     => {}
+                .out_of_memory  => {}
+            }
+        }
+    }
+
+    -- early return on error pattern
+    let r2 = parse_int("123")
+    match r2 {
+        .err(e) => { let _ = e }
+        .ok(v)  => {
+            -- continue with v
+            let _ = v
+        }
+    }
+}

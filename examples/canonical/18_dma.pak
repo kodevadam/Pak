@@ -1,0 +1,36 @@
+-- 18_dma.pak
+-- Demonstrates: DMA with required cache writeback and alignment.
+-- Shows the safety pattern the typechecker enforces.
+
+use n64.dma
+use n64.cache
+
+-- DMA destination MUST be @aligned(16)
+@aligned(16)
+static rx_buffer: [4096]u8 = undefined
+
+-- ROM address (physical address in cartridge space)
+const ROM_DATA_ADDR: u32 = 0x10040000
+const DATA_SIZE: u32 = 4096
+
+fn load_from_rom(dst: *u8, rom_addr: u32, size: u32) {
+    -- Step 1: writeback cache before DMA read (required, E201 if missing)
+    cache.writeback(dst, size)
+
+    -- Step 2: initiate DMA
+    dma.read(dst, rom_addr, size)
+
+    -- Step 3: wait for DMA to complete
+    dma.wait()
+
+    -- Step 4: invalidate cache so CPU sees new data
+    cache.invalidate(dst, size)
+}
+
+entry {
+    load_from_rom(&rx_buffer[0], ROM_DATA_ADDR, DATA_SIZE)
+
+    -- now rx_buffer contains the ROM data
+    let first_byte = rx_buffer[0]
+    let _ = first_byte
+}

@@ -1,0 +1,47 @@
+-- 06_variants.pak
+-- Demonstrates: variant (tagged union), match with payload extraction.
+
+-- unit cases only (like enum, but can mix with payload cases)
+variant Entity {
+    player
+    enemy
+    projectile
+    none
+}
+
+-- cases with payloads
+variant Shape {
+    circle(f32)           -- radius
+    rect(f32, f32)        -- width, height
+    point
+}
+
+-- cases with named fields
+variant Event {
+    key_press { key: u8 }
+    mouse_move { x: i32, y: i32 }
+    quit
+}
+
+fn area(s: Shape) -> f32 {
+    match s {
+        .circle(r)     => { return r * r * 3.14159 }
+        .rect(w, h)    => { return w * h }
+        .point         => { return 0.0 }
+    }
+}
+
+entry {
+    let s = Shape.circle(5.0)
+    let a = area(s)
+
+    -- match with payload binding
+    let e = Event.mouse_move { x: 100, y: 200 }
+    match e {
+        .key_press(k)    => {}
+        .mouse_move(x, y) => {}
+        .quit            => {}
+    }
+
+    let _ = a
+}

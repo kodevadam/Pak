@@ -1,0 +1,30 @@
+-- 14_assets.pak
+-- Demonstrates: asset declarations and usage with N64 sprite system.
+
+use n64.display
+use n64.rdpq
+use n64.sprite
+
+-- Declare assets (loaded from filesystem at runtime)
+asset player_sprite: Sprite from "sprites/player.png"
+asset enemy_sprite: Sprite from "sprites/enemy.png"
+asset bg_sprite: Sprite from "sprites/background.png"
+asset level_data from "levels/level1.bin"
+
+entry {
+    display.init(0, 0, 2, 0, 0)
+    rdpq.init()
+
+    loop {
+        let fb = display.get()
+        rdpq.attach_clear(fb)
+
+        -- use asset in rendering
+        rdpq.set_mode_copy()
+        sprite.blit(bg_sprite, 0, 0, 0)
+        sprite.blit(player_sprite, 160, 120, 0)
+        sprite.blit(enemy_sprite, 100, 80, 0)
+
+        rdpq.detach_show()
+    }
+}
