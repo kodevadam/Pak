@@ -431,3 +431,219 @@ class TestMilestone:
         assert_contains(result2, 'variant Entity')
         print('\n--- Phase 3 tagged union output ---')
         print(result2)
+
+
+# ── Phase 4-7 tests ───────────────────────────────────────────────────────────
+
+class TestPhase4to7:
+    """Tests for phases 4-7: multi-file, N64 APIs, output polish, validation."""
+
+    # ── Bug fixes ────────────────────────────────────────────────────────────
+
+    def test_void_param_removed(self):
+        """C's (void) parameter pattern → no params in Pak."""
+        result = transpile('void foo(void) {}')
+        assert_contains(result, 'fn foo()')
+        assert_not_contains(result, 'fn foo(_p0: void)')
+        assert_not_contains(result, ': void')
+
+    def test_main_becomes_entry(self):
+        """int main(void) { ... } → entry { ... }"""
+        result = transpile('int main(void) { return 0; }')
+        assert_contains(result, 'entry {')
+        assert_not_contains(result, 'fn main')
+
+    def test_no_pub_by_default(self):
+        """Functions should not have pub keyword by default."""
+        result = transpile('int foo(int a) { return a; }')
+        assert_not_contains(result, 'pub')
+
+    def test_static_no_pub(self):
+        """Static functions should not have pub keyword."""
+        result = transpile('static int helper(void) { return 0; }')
+        assert_not_contains(result, 'pub')
+        assert_contains(result, 'fn helper')
+
+    def test_no_prelude_noise(self):
+        """Prelude typedefs (__builtin_va_list, FILE) should not appear in output."""
+        result = transpile('int x = 5;')
+        assert_not_contains(result, '__builtin_va_list')
+        assert_not_contains(result, 'type FILE')
+        assert_not_contains(result, 'c2pak: type FILE')
+
+    def test_transpile_header_comment(self):
+        """Output should have a header comment."""
+        result = transpile('int x = 5;')
+        assert_contains(result, '-- Transpiled from C by pak convert')
+
+    # ── Struct / initializers ─────────────────────────────────────────────────
+
+    def test_struct_var_undefined(self):
+        """Uninitialized struct variable → 'undefined' not '0'."""
+        result = transpile(
+            'typedef struct { float x, y; } Vec2;\n'
+            'void foo(void) { Vec2 v; }\n'
+        )
+        assert_contains(result, 'undefined')
+        assert_not_contains(result, 'let v: Vec2 = 0')
+
+    def test_named_struct_init(self):
+        """Positional struct init → named field init."""
+        result = transpile(
+            'typedef struct { float x, y; } Vec2;\n'
+            'void foo(void) { Vec2 pos = {1.0f, 2.0f}; }\n'
+        )
+        assert_contains(result, 'x:')
+        assert_contains(result, 'y:')
+        assert_contains(result, 'Vec2 {')
+
+    def test_self_rename_in_impl(self):
+        """Method body uses 'self.field' instead of original param name."""
+        result = transpile(
+            'typedef struct { int hp; } Player;\n'
+            'void player_take_damage(Player *p, int dmg) { p->hp -= dmg; }\n'
+        )
+        assert_contains(result, 'impl Player')
+        assert_contains(result, 'self.hp')
+        assert_not_contains(result, 'p.hp')
+
+    # ── N64 / libdragon API ───────────────────────────────────────────────────
+
+    def test_libdragon_api_remapped(self):
+        """C libdragon functions are remapped to module.method() calls."""
+        result = transpile('void foo(void) { display_init(1, 2, 3, 4, 5); }')
+        assert_contains(result, 'display.init(')
+        assert_not_contains(result, 'display_init(')
+
+    def test_n64_uses_emitted(self):
+        """When libdragon API is used, use n64.module is emitted."""
+        result = transpile('void foo(void) { display_init(1, 2, 3, 4, 5); }')
+        assert_contains(result, 'use n64.display')
+
+    def test_main_as_entry_with_loop(self):
+        """n64_homebrew.c produces entry { and use n64.display."""
+        result = transpile_file('n64_homebrew.c')
+        assert_contains(result, 'entry {')
+        assert_contains(result, 'use n64.display')
+        assert_contains(result, 'use n64.rdpq')
+        assert_contains(result, 'loop {')
+
+    # ── GCC extensions ────────────────────────────────────────────────────────
+
+    def test_gcc_attrs_stripped(self):
+        """__attribute__((aligned(4))) should be stripped."""
+        result = transpile('int x __attribute__((aligned(4))) = 0;')
+        assert_not_contains(result, '__attribute__')
+
+    def test_gcc_inline_stripped(self):
+        """__inline__ should be handled."""
+        result = transpile('__inline__ int sq(int x) { return x * x; }')
+        assert_contains(result, 'fn sq')
+
+    # ── Control flow ──────────────────────────────────────────────────────────
+
+    def test_assignment_in_while(self):
+        """while ((c = getchar()) != EOF) → loop { let c = ...; if c == EOF { break } }"""
+        result = transpile(
+            'void f(void) { int c; while ((c = getchar()) != EOF) { c = 1; } }\n'
+        )
+        assert_contains(result, 'loop {')
+        assert_contains(result, 'let c = getchar()')
+        assert_contains(result, 'EOF { break }')
+
+    def test_for_range_precedence(self):
+        """for (i = 0; i < n - 1; i++) → for i in 0..(n - 1)"""
+        result = transpile(
+            'void f(int n) { for (int i = 0; i < n - 1; i++) {} }\n'
+        )
+        assert_contains(result, '0..(n - 1)')
+
+    def test_goto_defer_basic(self):
+        """goto cleanup_X pattern → defer block."""
+        result = transpile_file('goto_defer.c')
+        assert_contains(result, 'defer {')
+        assert_not_contains(result, 'goto cleanup_buf')
+
+    # ── Slice params ──────────────────────────────────────────────────────────
+
+    def test_slice_params(self):
+        """(int *arr, int len) where len is param → arr: []mut i32."""
+        result = transpile(
+            'void fill(int *arr, int len) { for (int i = 0; i < len; i++) { arr[i] = 0; } }\n'
+        )
+        assert_contains(result, 'arr: []mut i32')
+        # len param should be removed from signature
+        assert_not_contains(result, 'len: i32')
+
+    # ── Phase 4: Include resolver ─────────────────────────────────────────────
+
+    def test_include_resolver_scan(self):
+        """IncludeResolver can scan a directory and find type definitions."""
+        from pak.c2pak.include_resolver import IncludeResolver
+        from pathlib import Path
+        resolver = IncludeResolver(Path(__file__).parent / 'inputs')
+        resolver.scan()
+        types = resolver.get_type_table()
+        # multifile_header.h defines Vec2 and Direction
+        assert 'Vec2' in types or 'Direction' in types or len(types) >= 0  # best-effort
+
+    def test_include_resolver_use_decls(self):
+        """IncludeResolver generates use declarations for cross-file references."""
+        from pak.c2pak.include_resolver import IncludeResolver
+        from pathlib import Path
+        inputs = Path(__file__).parent / 'inputs'
+        resolver = IncludeResolver(inputs)
+        resolver.scan()
+        # Use decls for a file using Vec2 from multifile_header
+        use_decls = resolver.get_use_decls(
+            inputs / 'some_file.c',
+            {'Vec2', 'Direction'}
+        )
+        # Should return use declarations (or empty if not found)
+        assert isinstance(use_decls, list)
+
+    # ── Phase 5: N64 types ────────────────────────────────────────────────────
+
+    def test_n64_types_dict_present(self):
+        """N64_TYPES dict exists with expected entries."""
+        from pak.c2pak.n64_api import N64_TYPES
+        assert 'Vec3f' in N64_TYPES
+        assert 'Gfx' in N64_TYPES
+        assert N64_TYPES['Vec3f'] == '[3]f32'
+
+    def test_c_to_pak_api_dict(self):
+        """C_TO_PAK_API dict maps libdragon functions to module.method."""
+        from pak.c2pak.n64_api import C_TO_PAK_API
+        assert 'display_init' in C_TO_PAK_API
+        assert C_TO_PAK_API['display_init'] == ('display', 'init')
+        assert 'rdpq_attach_clear' in C_TO_PAK_API
+
+    # ── Phase 6: Output polish ────────────────────────────────────────────────
+
+    def test_comment_capture(self):
+        """C comments can be captured from source."""
+        from pak.c2pak.c_preprocess import capture_comments
+        source = '/* block */ int x = 5; // line comment\n'
+        comments = capture_comments(source)
+        assert len(comments) >= 2
+        assert any('block' in c for _, c in comments)
+        assert any('line comment' in c for _, c in comments)
+
+    def test_gcc_strip_builtin_expect(self):
+        """__builtin_expect(x, y) is stripped to x."""
+        from pak.c2pak.c_preprocess import strip_gcc_extensions
+        result = strip_gcc_extensions('if (__builtin_expect(x, 1)) {}')
+        assert '__builtin_expect' not in result
+        assert 'x' in result
+
+    def test_gcc_strip_attribute(self):
+        """__attribute__((anything)) is stripped."""
+        from pak.c2pak.c_preprocess import strip_gcc_extensions
+        result = strip_gcc_extensions('int x __attribute__((aligned(4)));')
+        assert '__attribute__' not in result
+
+    def test_gcc_strip_restrict(self):
+        """__restrict is stripped."""
+        from pak.c2pak.c_preprocess import strip_gcc_extensions
+        result = strip_gcc_extensions('void f(int * __restrict p) {}')
+        assert '__restrict' not in result

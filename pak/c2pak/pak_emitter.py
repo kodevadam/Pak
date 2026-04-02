@@ -32,6 +32,18 @@ from .stmt_mapper import StmtMapper
 from .decl_mapper import DeclMapper, _strip_prefix, _detect_enum_prefix
 from .idiom_detector import IdiomDetector, TaggedUnionInfo, MethodGroup
 from .c_preprocess import SimpleMacro
+from .n64_api import C_TO_PAK_API, get_use_statements
+
+
+# Names from the parser prelude that should be suppressed in output
+_PRELUDE_TYPEDEF_NAMES = frozenset({
+    's8', 'u8', 's16', 'u16', 's32', 'u32', 's64', 'u64',
+    'f32', 'f64',
+    'int8_t', 'uint8_t', 'int16_t', 'uint16_t',
+    'int32_t', 'uint32_t', 'int64_t', 'uint64_t',
+    'size_t', 'ptrdiff_t', '__builtin_va_list', 'bool', 'FILE',
+    'surface_t', 'wchar_t', 'uintptr_t', 'intptr_t',
+})
 
 
 @dataclass
@@ -40,6 +52,10 @@ class EmitOptions:
     no_idioms: bool = False
     decomp: bool = False
     style: str = 'default'
+    # Extra types from header resolver (name → type string)
+    extra_types: Dict[str, str] = field(default_factory=dict)
+    # Captured comments (line_num, text)
+    comments: List[Tuple[int, str]] = field(default_factory=list)
 
 
 class PakEmitter:
@@ -51,6 +67,8 @@ class PakEmitter:
         self.em = ExprMapper(self.tm)
         self.sm = StmtMapper(self.tm, self.em)
         self.dm = DeclMapper(self.tm, self.em, self.sm)
+        # Track which N64 modules are used
+        self._used_n64_modules: Set[str] = set()
 
     def emit(self, c_file: CFile) -> str:
         """Convert *c_file* to a Pak source string."""
@@ -58,6 +76,9 @@ class PakEmitter:
 
         # Phase 1: Register all typedefs for type resolution
         self.tm.register_typedefs_from_decls(c_file.decls)
+
+        # Register struct field names for named initializer support
+        self.tm.register_struct_fields_from_decls(c_file.decls)
 
         # Phase 2: Run idiom detector
         detector = IdiomDetector(c_file)
@@ -75,10 +96,7 @@ class PakEmitter:
 
         # Build sets of names consumed by idiom transformations
         tagged_struct_names: Set[str] = {tu.struct_name for tu in tagged_unions}
-        # For tagged unions, also skip the backing enum and union
         tagged_enum_names: Set[str] = {tu.tag_enum for tu in tagged_unions}
-        # Note: we may want to keep the enum if used elsewhere, but for
-        # simplicity we suppress it when replaced by a variant.
 
         method_func_names: Set[str] = set()
         for mg in method_groups:
@@ -106,16 +124,36 @@ class PakEmitter:
 
         # Phase 6: Emit impl blocks for method groups
         for mg in method_groups:
-            impl_lines = self.dm.emit_impl_block(mg.struct_name, mg.methods)
+            impl_lines = self.dm.emit_impl_block(
+                mg.struct_name, mg.methods, n64_modules=self._used_n64_modules)
             lines.extend(impl_lines)
             lines.append('')
 
-        # Clean up trailing blank lines
-        while lines and lines[-1] == '':
-            lines.pop()
-        lines.append('')  # final newline
+        # Build final output: header + use declarations + body
+        final_lines: List[str] = []
+        final_lines.append('-- Transpiled from C by pak convert')
+        final_lines.append('')
 
-        return '\n'.join(lines)
+        # Phase 6: Insert top-level file comments if preserve_comments=True
+        if self.options.preserve_comments and self.options.comments:
+            for _lineno, comment_text in self.options.comments:
+                final_lines.append(comment_text)
+            final_lines.append('')
+
+        # Add N64 use declarations
+        if self._used_n64_modules:
+            for use_line in get_use_statements(self._used_n64_modules):
+                final_lines.append(use_line)
+            final_lines.append('')
+
+        final_lines.extend(lines)
+
+        # Clean up trailing blank lines
+        while final_lines and final_lines[-1] == '':
+            final_lines.pop()
+        final_lines.append('')  # final newline
+
+        return '\n'.join(final_lines)
 
     # ── Declaration emission ──────────────────────────────────────────────────
 
@@ -138,10 +176,6 @@ class PakEmitter:
 
         elif isinstance(decl, CUnionDecl):
             # Raw union (not consumed by a tagged union variant)
-            # Check if any tagged union consumed this union
-            for name in skip_structs:
-                pass  # We skip unions that are inlined into variant declarations
-            # For now, emit raw unions as-is
             return self.dm.emit_union(decl)
 
         elif isinstance(decl, CEnumDecl):
@@ -161,18 +195,38 @@ class PakEmitter:
         elif isinstance(decl, CFuncDef):
             if decl.sig.name in skip_funcs:
                 return None
-            return self.dm.emit_func_def_full(decl)
+            # Special case: main() → entry block
+            if decl.sig.name == 'main':
+                return self._emit_entry_block(decl)
+            return self.dm.emit_func_def_full(decl, n64_modules=self._used_n64_modules)
 
         elif isinstance(decl, CVarDecl):
             return self.dm.emit_global_var(decl)
 
         return None
 
+    def _emit_entry_block(self, defn: CFuncDef) -> List[str]:
+        """Emit the C main() function as a Pak entry block."""
+        from .stmt_mapper import StmtMapper
+        lines = ['entry {']
+        sm = StmtMapper(self.tm, self.em)
+        sm._indent = 1
+        sm._n64_modules = self._used_n64_modules
+        body_lines: List[str] = []
+        sm._emit_compound_items(defn.body.items, body_lines)
+        lines.extend(body_lines)
+        lines.append('}')
+        return lines
+
     def _emit_typedef(self, decl: CTypeDef,
                       fixed_point_types: Dict[str, str]) -> Optional[List[str]]:
         """Emit a typedef as a Pak type alias or skip it."""
         name = decl.name
         typ = decl.typ
+
+        # Suppress prelude-derived typedefs — they're just noise
+        if name in _PRELUDE_TYPEDEF_NAMES:
+            return None
 
         # Fixed-point types are registered but not emitted (they're replaced inline)
         if name in fixed_point_types:
@@ -209,6 +263,9 @@ class PakEmitter:
         # typedef T* Name; or typedef fn(...) Name;
         if isinstance(typ, CPointer):
             pak_type = self.tm.map_type(typ)
+            # Suppress prelude-like pointer typedefs
+            if name in _PRELUDE_TYPEDEF_NAMES:
+                return None
             return [f'-- c2pak: type {name} = {pak_type}']
 
         if isinstance(typ, CFuncPtr):

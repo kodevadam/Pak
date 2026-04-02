@@ -26,10 +26,11 @@ class DeclMapper:
     """Converts C declaration AST nodes to Pak source strings."""
 
     def __init__(self, type_mapper: TypeMapper, expr_mapper: ExprMapper,
-                 stmt_mapper: StmtMapper):
+                 stmt_mapper: StmtMapper, enable_slice_transform: bool = True):
         self.tm = type_mapper
         self.em = expr_mapper
         self.sm = stmt_mapper
+        self.enable_slice_transform = enable_slice_transform
 
     # ── Struct declarations ───────────────────────────────────────────────────
 
@@ -168,13 +169,21 @@ class DeclMapper:
         lines.append('}')
         return lines
 
-    def emit_func_def_full(self, defn: CFuncDef, method_of: str = None) -> List[str]:
+    def emit_func_def_full(self, defn: CFuncDef, method_of: str = None,
+                           n64_modules: set = None) -> List[str]:
         """Emit a complete function definition."""
         lines = []
         sig_str = self._emit_sig(defn.sig, method_of=method_of)
         lines.append(sig_str + ' {')
         sm = StmtMapper(self.tm, self.em)
         sm._indent = 1
+        # Set up self-rename if this is a method
+        if method_of and defn.sig.params:
+            first_param = defn.sig.params[0]
+            if first_param.name and self.tm.is_pointer_to(first_param.typ, method_of):
+                sm._self_rename = first_param.name  # old param name → self
+        if n64_modules is not None:
+            sm._n64_modules = n64_modules
         body_lines: List[str] = []
         sm._emit_compound_items(defn.body.items, body_lines)
         lines.extend(body_lines)
@@ -190,22 +199,33 @@ class DeclMapper:
             if name.lower().startswith(prefix):
                 name = name[len(prefix):]
 
-        params = self._emit_params(sig.params, method_of=method_of)
+        if self.enable_slice_transform:
+            params = self._emit_params_with_slices(sig.params, method_of=method_of)
+        else:
+            params = self._emit_params(sig.params, method_of=method_of)
         ret = self.tm.map_type(sig.ret)
 
-        pub = 'pub ' if not sig.is_static else ''
+        # No pub by default — only explicitly exported functions get pub
+        # (static functions definitely don't get pub)
         if self.tm.is_void(sig.ret):
-            return f'{pub}fn {name}({params})'
-        return f'{pub}fn {name}({params}) -> {ret}'
+            return f'fn {name}({params})'
+        return f'fn {name}({params}) -> {ret}'
 
-    def _emit_params(self, params: List[CParam], method_of: str = None) -> str:
+    def _emit_params(self, params: List[CParam], method_of: str = None,
+                    skip_indices: set = None) -> str:
         parts = []
+        skip_indices = skip_indices or set()
         for i, p in enumerate(params):
+            if i in skip_indices:
+                continue
             if p.is_variadic:
                 parts.append('...')
                 continue
-            name = p.name or f'_p{i}'
+            # Strip C's (void) parameter — a single void param means no params
             typ = self.tm.map_type(p.typ)
+            if typ == 'void':
+                continue  # skip void params
+            name = p.name or f'_p{i}'
             # First param that's a pointer to method_of struct → rename to self
             if method_of and i == 0 and self.tm.is_pointer_to(p.typ, method_of):
                 if isinstance(p.typ, CPointer) and not p.typ.is_const:
@@ -214,6 +234,58 @@ class DeclMapper:
                     parts.append(f'self: *{method_of}')
                 continue
             parts.append(f'{name}: {typ}')
+        return ', '.join(parts)
+
+    def _emit_params_with_slices(self, params: List[CParam], method_of: str = None) -> str:
+        """Emit parameters, converting (ptr, len) pairs to slice params."""
+        from .c_ast import CPointer, CPrimitive
+        from .type_mapper import _PRIMITIVE_MAP
+
+        # Detect (ptr, len) pairs
+        skip_indices: set = set()
+        slice_params: dict = {}  # ptr_idx → (ptr_name, inner_type, len_name)
+
+        for i, p in enumerate(params):
+            if not isinstance(p.typ, CPointer):
+                continue
+            inner = self.tm.map_type(p.typ.inner if hasattr(p.typ, 'inner') else p.typ)
+            for j in range(i + 1, min(i + 3, len(params))):
+                q = params[j]
+                q_typ = self.tm.map_type(q.typ)
+                if q_typ not in ('i32', 'u32', 'i64', 'u64', 'i16', 'u16'):
+                    continue
+                q_name = q.name or ''
+                if any(s in q_name.lower() for s in ('len', 'count', 'size', 'n', 'num', 'cnt')):
+                    # Found a (ptr, len) pair
+                    ptr_name = p.name or f'_p{i}'
+                    inner_type = self.tm.map_type(p.typ.inner) if hasattr(p.typ, 'inner') else '*u8'
+                    mut_str = 'mut ' if not p.typ.is_const else ''
+                    slice_params[i] = (ptr_name, f'[]{mut_str}{inner_type}')
+                    skip_indices.add(j)
+                    break
+
+        parts = []
+        for i, p in enumerate(params):
+            if i in skip_indices:
+                continue
+            if p.is_variadic:
+                parts.append('...')
+                continue
+            typ = self.tm.map_type(p.typ)
+            if typ == 'void':
+                continue
+            name = p.name or f'_p{i}'
+            if method_of and i == 0 and self.tm.is_pointer_to(p.typ, method_of):
+                if isinstance(p.typ, CPointer) and not p.typ.is_const:
+                    parts.append(f'self: *mut {method_of}')
+                else:
+                    parts.append(f'self: *{method_of}')
+                continue
+            if i in slice_params:
+                _, slice_type = slice_params[i]
+                parts.append(f'{name}: {slice_type}')
+            else:
+                parts.append(f'{name}: {typ}')
         return ', '.join(parts)
 
     # ── Global variable declarations ──────────────────────────────────────────
@@ -239,13 +311,15 @@ class DeclMapper:
     # ── impl blocks ───────────────────────────────────────────────────────────
 
     def emit_impl_block(self, struct_name: str,
-                        methods: List[CFuncDef]) -> List[str]:
+                        methods: List[CFuncDef],
+                        n64_modules: set = None) -> List[str]:
         """Emit an impl block grouping methods for a struct."""
         lines = [f'impl {struct_name} {{']
         for i, method in enumerate(methods):
             if i > 0:
                 lines.append('')
-            method_lines = self.emit_func_def_full(method, method_of=struct_name)
+            method_lines = self.emit_func_def_full(
+                method, method_of=struct_name, n64_modules=n64_modules)
             for ml in method_lines:
                 lines.append('    ' + ml)
         lines.append('}')

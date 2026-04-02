@@ -17,6 +17,117 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 
+# ── GCC extension stripping ───────────────────────────────────────────────────
+
+def strip_gcc_extensions(source: str) -> str:
+    """Strip GCC-specific extensions that pycparser cannot handle.
+
+    Removes/replaces:
+      - __attribute__((anything))
+      - __extension__
+      - __restrict, __restrict__
+      - __volatile__ → volatile
+      - __inline__, __inline → inline
+      - __asm__("...") blocks
+      - typeof(x) → int (placeholder)
+      - __builtin_expect(x, y) → x
+      - __builtin_offsetof(T, f) → offsetof(T, f)
+      - __builtin_va_list (kept — handled by prelude typedef)
+    """
+    # __attribute__((...)) — handle nested parens
+    source = _strip_attribute(source)
+
+    # __asm__("...") or asm volatile ("...") — remove entire asm block
+    source = re.sub(r'\b(?:__asm__|asm)\s*(?:volatile\s*)?\([^;]*\)\s*;?', '', source)
+    source = re.sub(r'\b(?:__asm__|asm)\s*(?:volatile\s*)?\([^;]*\)', '', source)
+
+    # __extension__ keyword — just remove it
+    source = re.sub(r'\b__extension__\b', '', source)
+
+    # __restrict, __restrict__
+    source = re.sub(r'\b__restrict(?:__)?(?=\s)', ' ', source)
+
+    # __volatile__ → volatile
+    source = re.sub(r'\b__volatile__\b', 'volatile', source)
+
+    # __inline__, __inline → inline
+    source = re.sub(r'\b__inline(?:__)?(?=\s|\()', 'inline', source)
+
+    # __builtin_expect(x, y) → x
+    source = _replace_builtin_expect(source)
+
+    # __builtin_offsetof(T, f) → offsetof(T, f)
+    source = re.sub(r'\b__builtin_offsetof\b', 'offsetof', source)
+
+    # typeof(x) → int  (placeholder — we can't infer the type)
+    source = re.sub(r'\btypeof\s*\([^)]*\)', 'int', source)
+
+    # __typeof__(x) → int
+    source = re.sub(r'\b__typeof__\s*\([^)]*\)', 'int', source)
+
+    return source
+
+
+def _strip_attribute(source: str) -> str:
+    """Remove __attribute__((...)) constructs, handling nested parens."""
+    result = []
+    i = 0
+    n = len(source)
+    attr_pat = re.compile(r'__attribute__\s*\(')
+    while i < n:
+        m = attr_pat.search(source, i)
+        if m is None:
+            result.append(source[i:])
+            break
+        result.append(source[i:m.start()])
+        # Find matching closing paren (need double parens: __attribute__((..)))
+        j = m.end()  # position after first '('
+        depth = 1
+        while j < n and depth > 0:
+            if source[j] == '(':
+                depth += 1
+            elif source[j] == ')':
+                depth -= 1
+            j += 1
+        i = j  # skip past the entire __attribute__((...))
+    return ''.join(result)
+
+
+def _replace_builtin_expect(source: str) -> str:
+    """Replace __builtin_expect(x, y) with x."""
+    result = []
+    i = 0
+    n = len(source)
+    pat = re.compile(r'__builtin_expect\s*\(')
+    while i < n:
+        m = pat.search(source, i)
+        if m is None:
+            result.append(source[i:])
+            break
+        result.append(source[i:m.start()])
+        j = m.end()
+        depth = 1
+        start_inner = j
+        # Find the first argument (up to the first comma at depth 1)
+        first_arg_end = None
+        while j < n and depth > 0:
+            if source[j] == '(':
+                depth += 1
+            elif source[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    if first_arg_end is None:
+                        first_arg_end = j
+            elif source[j] == ',' and depth == 1:
+                if first_arg_end is None:
+                    first_arg_end = j
+            j += 1
+        if first_arg_end is not None:
+            result.append(source[start_inner:first_arg_end])
+        i = j
+    return ''.join(result)
+
+
 # ── Macro representation ──────────────────────────────────────────────────────
 
 @dataclass
@@ -211,7 +322,72 @@ def strip_comments(source: str) -> str:
 
 def preprocess(source: str) -> Tuple[str, Dict[str, SimpleMacro]]:
     """Convenience function: preprocess *source* and return cleaned text + macros."""
-    # First strip comments (pycparser can't handle them)
+    # First strip GCC extensions
+    source = strip_gcc_extensions(source)
+    # Then strip comments (pycparser can't handle them)
     source = strip_comments(source)
     pp = Preprocessor()
     return pp.process(source)
+
+
+def capture_comments(source: str) -> List[Tuple[int, str]]:
+    """Capture C comments and return list of (line_number, text) tuples.
+
+    Captures both block comments /* ... */ and line comments // ...
+    Line numbers are 1-based.
+    """
+    comments = []
+    i = 0
+    n = len(source)
+    line_num = 1
+
+    while i < n:
+        # Block comment
+        if source[i] == '/' and i + 1 < n and source[i + 1] == '*':
+            start_line = line_num
+            i += 2
+            text_parts = ['/*']
+            while i < n:
+                if source[i] == '*' and i + 1 < n and source[i + 1] == '/':
+                    text_parts.append('*/')
+                    i += 2
+                    break
+                elif source[i] == '\n':
+                    line_num += 1
+                    text_parts.append('\n')
+                else:
+                    text_parts.append(source[i])
+                i += 1
+            text = ''.join(text_parts)
+            # Extract just the content
+            content = text[2:-2].strip() if text.endswith('*/') else text[2:].strip()
+            comments.append((start_line, '-- ' + content.replace('\n', ' ')))
+        # Line comment
+        elif source[i] == '/' and i + 1 < n and source[i + 1] == '/':
+            start_line = line_num
+            i += 2
+            text_parts = []
+            while i < n and source[i] != '\n':
+                text_parts.append(source[i])
+                i += 1
+            content = ''.join(text_parts).strip()
+            comments.append((start_line, '-- ' + content))
+        elif source[i] == '"':
+            # Skip string literal
+            i += 1
+            while i < n:
+                if source[i] == '\\' and i + 1 < n:
+                    i += 2
+                elif source[i] == '"':
+                    i += 1
+                    break
+                else:
+                    if source[i] == '\n':
+                        line_num += 1
+                    i += 1
+        elif source[i] == '\n':
+            line_num += 1
+            i += 1
+        else:
+            i += 1
+    return comments

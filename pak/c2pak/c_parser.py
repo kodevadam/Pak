@@ -109,6 +109,10 @@ typedef s32 ptrdiff_t;
 typedef void *__builtin_va_list;
 typedef int bool;
 typedef void *FILE;
+typedef void *surface_t;
+typedef int wchar_t;
+typedef unsigned int uintptr_t;
+typedef signed int intptr_t;
 """
 
 

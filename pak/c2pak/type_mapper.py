@@ -10,7 +10,7 @@ from typing import Dict, Optional
 
 from .c_ast import (
     CType, CPrimitive, CPointer, CArray, CStruct, CUnion, CEnum,
-    CFuncPtr, CTypeRef, CField, CVarDecl, CTypeDef,
+    CFuncPtr, CTypeRef, CField, CVarDecl, CTypeDef, CStructDecl, CUnionDecl,
 )
 
 
@@ -126,6 +126,8 @@ class TypeMapper:
     def __init__(self):
         # typedef name → CType (allows resolving typedef chains)
         self._typedefs: Dict[str, CType] = {}
+        # struct name → ordered list of field names (for named initializer support)
+        self._struct_fields: Dict[str, list] = {}
 
     def register_typedef(self, name: str, typ: CType):
         """Register a typedef so it can be resolved later."""
@@ -136,6 +138,21 @@ class TypeMapper:
         for decl in decls:
             if isinstance(decl, CTypeDef):
                 self.register_typedef(decl.name, decl.typ)
+
+    def register_struct_fields_from_decls(self, decls):
+        """Walk decls and record field names for each struct/union (for named initializers)."""
+        for decl in decls:
+            if isinstance(decl, CStructDecl) and decl.fields:
+                self._struct_fields[decl.name] = [f.name for f in decl.fields]
+            elif isinstance(decl, CUnionDecl) and decl.fields:
+                self._struct_fields[decl.name] = [f.name for f in decl.fields]
+            elif isinstance(decl, CTypeDef):
+                if isinstance(decl.typ, CStruct) and decl.typ.fields:
+                    self._struct_fields[decl.name] = [f.name for f in decl.typ.fields]
+
+    def get_struct_fields(self, name: str) -> list:
+        """Return ordered field names for a struct/union, or []."""
+        return self._struct_fields.get(name, [])
 
     def map_type(self, typ: CType, context: str = '') -> str:
         """Convert a CType to its Pak type string.
