@@ -682,6 +682,10 @@ def main():
     p_pack.add_argument('--base', help='Base directory to strip from archive paths')
     p_pack.set_defaults(func=cmd_pack)
 
+    # convert (C-to-Pak transpiler)
+    from .c2pak.cli import register_subcommand as _register_convert
+    _register_convert(sub)
+
     # runtime-dir (internal, used by generated Makefile)
     p_rtdir = sub.add_parser('--runtime-dir', help=argparse.SUPPRESS)
     p_rtdir.set_defaults(func=cmd_runtime_dir)
