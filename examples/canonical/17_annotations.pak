@@ -3,10 +3,12 @@
 
 -- @hot: tells compiler to optimize this function for speed
 @hot
-fn render_scanline(fb: *u8, y: i32, color: u32) {
-    for x in 0..320 {
-        fb[y * 320 + x] = color as u8
+fn sum_scanline(buf: *u8, y: i32, width: i32) -> i32 {
+    let mut total: i32 = 0
+    for x in 0..width {
+        total += buf[y * width + x] as i32
     }
+    return total
 }
 
 -- @aligned: required for DMA buffers (must be power of 2)
@@ -22,11 +24,6 @@ static dma_out: [4096]u8 = undefined
 
 -- @cfg: conditional compilation
 @cfg(DEBUG_MODE)
-fn debug_dump(ptr: *u8, len: i32) {
-    -- only compiled if DEBUG_MODE is defined
-}
-
-@cfg(not(RELEASE))
 static debug_counters: [16]i32 = undefined
 
 -- Multiple annotations on one declaration
@@ -36,7 +33,13 @@ struct CriticalBuffer {
     data: [256]u8
 }
 
+static sink: i32 = 0
+
 entry {
     let pkt = DMAPacket { header: 0xABCD, data: undefined }
-    let _ = pkt
+    dma_out[0] = pkt.header as u8
+
+    let cb = CriticalBuffer { data: undefined }
+    sink = cb.data[0] as i32
+    sink = sum_scanline(&dma_out[0], 0, 320)
 }

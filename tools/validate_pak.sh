@@ -2,9 +2,9 @@
 # validate_pak.sh — Run the Pak compiler checker on one or more .pak files.
 #
 # Usage:
-#   tools/validate_pak.sh file.pak
-#   tools/validate_pak.sh src/*.pak
-#   tools/validate_pak.sh          # checks all .pak files in the project
+#   tools/validate_pak.sh file.pak            # check one file
+#   tools/validate_pak.sh src/*.pak           # check multiple files individually
+#   tools/validate_pak.sh                     # check whole project (pak.toml required)
 #
 # Exit codes:
 #   0 — all files passed
@@ -12,6 +12,10 @@
 #
 # This is the mechanical enforcement layer. If pak check fails,
 # the code is wrong. Fix the errors reported before proceeding.
+#
+# Note: checking multiple files with entry blocks together triggers E103
+# (multiple entry blocks). Each standalone example file should be
+# checked individually, not all at once.
 
 set -euo pipefail
 
@@ -26,9 +30,20 @@ if ! command -v pak &>/dev/null; then
     exit 1
 fi
 
-# Run check
 if [ $# -eq 0 ]; then
+    # No args: check whole project via pak.toml
     pak check
+elif [ $# -eq 1 ]; then
+    # Single file: check directly
+    pak check "$1"
 else
-    pak check "$@"
+    # Multiple files: check each individually to avoid cross-file false positives
+    # (e.g. E103 multiple entry blocks when checking standalone examples together)
+    overall=0
+    for f in "$@"; do
+        if ! pak check "$f"; then
+            overall=1
+        fi
+    done
+    exit $overall
 fi

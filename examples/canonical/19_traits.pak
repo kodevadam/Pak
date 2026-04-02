@@ -1,11 +1,11 @@
 -- 19_traits.pak
--- Demonstrates: trait definition, impl for trait, trait objects.
+-- Demonstrates: trait definition, impl for trait.
 -- Status: [PARTIAL] — parsed and type-checked, codegen partial.
 
 trait Drawable {
     fn draw(self: *Self, x: i32, y: i32)
-    fn width(self: *Self) -> i32
-    fn height(self: *Self) -> i32
+    fn get_width(self: *Self) -> i32
+    fn get_height(self: *Self) -> i32
 }
 
 trait Updatable {
@@ -21,12 +21,13 @@ struct Sprite {
 
 impl Sprite for Drawable {
     fn draw(self: *Sprite, x: i32, y: i32) {
-        -- render sprite at x, y
+        self.x = x
+        self.y = y
     }
-    fn width(self: *Sprite) -> i32 {
+    fn get_width(self: *Sprite) -> i32 {
         return self.w
     }
-    fn height(self: *Sprite) -> i32 {
+    fn get_height(self: *Sprite) -> i32 {
         return self.h
     }
 }
@@ -43,13 +44,14 @@ impl Enemy for Updatable {
     }
 }
 
+static sink: i32 = 0
+
 entry {
     let mut spr = Sprite { x: 0, y: 0, w: 16, h: 16 }
     spr.draw(10, 20)
-    let w = spr.width()
+    sink = spr.get_width()
 
     let mut enemy = Enemy { x: 0.0, y: 0.0, speed: 50.0 }
     enemy.update(0.016)
-
-    let _ = w
+    sink = enemy.x as i32
 }

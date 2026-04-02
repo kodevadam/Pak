@@ -2,14 +2,14 @@
 -- Demonstrates: module declaration and cross-file structure.
 -- Status: [PARTIAL]
 --
--- This is the main file. Companion file: 20_multifile_math.pak
+-- In a multi-file project, declare the module path at the top of each file.
+-- The entry block lives in only one file (typically main.pak).
+-- Other files declare their module path and are imported via 'use'.
 
 module main
 
-use math      -- import the math module (from 20_multifile_math.pak or similar)
+-- use other.module   -- would import another file's module
 
 entry {
-    -- use functions from other modules
-    let v = math.clamp(150, 0, 100)
-    let _ = v
+    -- entry block exists in only one file per project
 }

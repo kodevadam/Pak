@@ -15,6 +15,9 @@ fn vec2fx_scale(v: Vec2fx, s: fix16.16) -> Vec2fx {
     return Vec2fx { x: v.x * s, y: v.y * s }
 }
 
+static sink_x: fix16.16 = 0.0
+static sink_i: i32 = 0
+
 entry {
     -- fixed-point literals
     let a: fix16.16 = 1.5
@@ -28,8 +31,8 @@ entry {
     let quot = b / a          -- ~1.333
 
     -- cast to/from integer
-    let as_int: i32 = a as i32       -- 1 (truncates)
-    let from_int: fix16.16 = 3 as fix16.16   -- 3.0
+    sink_i = a as i32         -- 1 (truncates)
+    sink_x = 3 as fix16.16   -- 3.0
 
     -- struct usage
     let pos = Vec2fx { x: 10.0, y: 5.0 }
@@ -37,12 +40,5 @@ entry {
     let next_pos = vec2fx_add(pos, vel)
     let scaled = vec2fx_scale(vel, 2.0)
 
-    let _ = sum
-    let _ = diff
-    let _ = prod
-    let _ = quot
-    let _ = as_int
-    let _ = from_int
-    let _ = next_pos
-    let _ = scaled
+    sink_x = sum + diff + prod + quot + next_pos.x + scaled.x
 }

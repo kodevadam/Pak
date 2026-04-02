@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Git pre-commit hook: validate all staged .pak files before commit.
+#
+# Install by symlinking into .git/hooks/:
+#   ln -sf ../../tools/pre-commit .git/hooks/pre-commit
+#
+# Or run once:
+#   tools/install-hooks.sh
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# Ensure pak is installed
+if ! command -v pak &>/dev/null; then
+    echo "WARNING: 'pak' not found — skipping Pak validation."
+    echo "         Install with: pip install -e ."
+    exit 0
+fi
+
+# Get list of staged .pak files
+staged=$(git diff --cached --name-only --diff-filter=ACM | grep '\.pak$' || true)
+
+if [ -z "$staged" ]; then
+    exit 0  # No .pak files staged
+fi
+
+echo "Validating staged .pak files..."
+failed=0
+
+for f in $staged; do
+    if [ -f "$f" ]; then
+        result=$(pak check "$f" 2>&1)
+        if [ $? -ne 0 ]; then
+            echo ""
+            echo "  FAIL: $f"
+            echo "$result" | sed 's/^/    /'
+            failed=1
+        else
+            echo "  ok:   $f"
+        fi
+    fi
+done
+
+if [ $failed -ne 0 ]; then
+    echo ""
+    echo "Commit blocked: fix Pak errors before committing."
+    echo "Reference LANGUAGE.md and NOT_SUPPORTED.md."
+    exit 1
+fi
+
+echo "All staged .pak files valid."

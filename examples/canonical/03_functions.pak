@@ -21,22 +21,22 @@ fn reset(ptr: *i32) {
     *ptr = 0
 }
 
--- pointer parameter, mutation through pointer
+-- mutation through pointer
 fn increment(ptr: *mut i32) {
     *ptr = *ptr + 1
 }
 
+static result_sink: i32 = 0
+
 entry {
-    let result = add(3, 4)       -- 7
-    let m = max(1.5, 2.5)        -- 2.5
-    let c = clamp(150.0, 0.0, 100.0)  -- 100.0
+    result_sink = add(3, 4)          -- 7
+    let m = max(1.5, 2.5)            -- 2.5
+    let c = clamp(150.0, 0.0, 100.0) -- 100.0
 
     let mut count: i32 = 5
-    increment(&mut count)         -- count is now 6
-    reset(&count)                 -- count is now 0
+    increment(&mut count)            -- count is now 6
+    reset(&count)                    -- count is now 0
 
-    let _ = result
-    let _ = m
-    let _ = c
-    let _ = count
+    -- use values to confirm they were computed
+    result_sink = count + (m as i32) + (c as i32)
 }

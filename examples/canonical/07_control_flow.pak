@@ -16,15 +16,17 @@ fn sign(x: i32) -> i32 {
     }
 }
 
+static sink: i32 = 0
+
 entry {
     -- if / elif / else
     let x: i32 = 5
     if x > 10 {
-        -- not taken
+        sink = 1
     } elif x > 3 {
-        -- taken
+        sink = 2    -- taken
     } else {
-        -- not taken
+        sink = 3
     }
 
     -- loop with break
@@ -58,10 +60,6 @@ entry {
         sum += k
     }
 
-    let _ = count
-    let _ = n
-    let _ = i
-    let _ = sum
-    let _ = abs(-3)
-    let _ = sign(x)
+    -- use results
+    sink = abs(-3) + sign(x) + count + n + i + sum
 }

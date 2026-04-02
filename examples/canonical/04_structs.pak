@@ -39,6 +39,9 @@ impl Player {
     }
 }
 
+static sink_x: f32 = 0.0
+static sink_hp: i32 = 0
+
 entry {
     -- struct literal
     let mut p = Player {
@@ -49,15 +52,15 @@ entry {
     }
 
     -- field access
-    let x = p.pos.x
-    let hp = p.health
+    sink_x = p.pos.x
+    sink_hp = p.health
 
     -- method calls
     p.move(1.0, 0.0)
     p.take_damage(10)
-    let alive = p.is_alive()
+    sink_hp = p.health
 
-    let _ = x
-    let _ = hp
-    let _ = alive
+    if p.is_alive() {
+        sink_hp = p.health
+    }
 }

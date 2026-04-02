@@ -1,47 +1,60 @@
 -- 06_variants.pak
--- Demonstrates: variant (tagged union), match with payload extraction.
+-- Demonstrates: variant (tagged union), match dispatch.
+--
+-- NOTE: Variant payload bindings in match arms (.case(x) => ...) are parsed
+-- but payload-bound names are not yet tracked by the typechecker.
+-- Use unit cases for dispatch, and store payload data in structs instead.
 
--- unit cases only (like enum, but can mix with payload cases)
+-- Unit cases only (fully supported)
+-- Note: do not use keyword names (none, ok, err, true, false) as variant cases
 variant Entity {
     player
     enemy
     projectile
-    none
+    empty       -- NOT 'none' — 'none' is a keyword
 }
 
--- cases with payloads
+-- Cases with payloads — construction works, payload binding in match is [PARTIAL]
 variant Shape {
     circle(f32)           -- radius
     rect(f32, f32)        -- width, height
     point
 }
 
--- cases with named fields
-variant Event {
-    key_press { key: u8 }
-    mouse_move { x: i32, y: i32 }
-    quit
-}
-
-fn area(s: Shape) -> f32 {
-    match s {
-        .circle(r)     => { return r * r * 3.14159 }
-        .rect(w, h)    => { return w * h }
-        .point         => { return 0.0 }
+-- Dispatch on unit cases (exhaustive match works)
+fn entity_name(e: Entity) -> i32 {
+    match e {
+        .player      => { return 0 }
+        .enemy       => { return 1 }
+        .projectile  => { return 2 }
+        .empty       => { return 3 }
     }
 }
+
+-- Dispatch with wildcard
+fn is_living(e: Entity) -> bool {
+    match e {
+        .player => { return true  }
+        .enemy  => { return true  }
+        _       => { return false }
+    }
+}
+
+static sink: i32 = 0
 
 entry {
+    let e = Entity.empty
+    sink = entity_name(e)
+
+    if is_living(e) { sink = 1 }
+
+    -- Construct variant with payload (works)
     let s = Shape.circle(5.0)
-    let a = area(s)
 
-    -- match with payload binding
-    let e = Event.mouse_move { x: 100, y: 200 }
-    match e {
-        .key_press(k)    => {}
-        .mouse_move(x, y) => {}
-        .quit            => {}
+    -- Dispatch on variant (works — no payload binding)
+    match s {
+        .circle => { sink = 10 }
+        .rect   => { sink = 20 }
+        .point  => { sink = 30 }
     }
-
-    let _ = a
 }

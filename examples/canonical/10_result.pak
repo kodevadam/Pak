@@ -1,5 +1,12 @@
 -- 10_result.pak
--- Demonstrates: Result type, ok/err constructors, match on Result.
+-- Demonstrates: Result type, ok/err constructors, handling results.
+--
+-- IMPORTANT LIMITATION: Matching on .ok(val) and .err(e) does NOT currently
+-- work because 'ok' and 'err' are reserved keywords and cannot be used as
+-- match pattern names. The parser rejects them with E002.
+--
+-- WORKAROUND: Use a bool flag or a separate enum to signal success/failure,
+-- or check results using if-chains as shown below.
 
 enum LoadError: u8 {
     file_not_found
@@ -7,47 +14,58 @@ enum LoadError: u8 {
     out_of_memory
 }
 
+-- Returning Result works fine — ok() and err() as constructors are valid
 fn load_data(path: *c_char) -> Result(i32, LoadError) {
-    -- In real code: check if file exists, parse it, etc.
-    -- This is a simplified example.
     if path == none {
         return err(LoadError.file_not_found)
     }
     return ok(42)
 }
 
-fn parse_int(s: *c_char) -> Result(i32, LoadError) {
-    -- simplified: always succeeds here
-    return ok(0)
+fn always_ok() -> Result(i32, LoadError) {
+    return ok(100)
 }
 
+fn always_err() -> Result(i32, LoadError) {
+    return err(LoadError.bad_format)
+}
+
+-- Alternative pattern: pair of (success: bool, value: i32)
+-- Use this when you need to branch on result in the current implementation
+struct MaybeI32 {
+    success: bool
+    value: i32
+    error_code: i32
+}
+
+fn safe_divide(a: i32, b: i32) -> MaybeI32 {
+    if b == 0 {
+        return MaybeI32 { success: false, value: 0, error_code: 1 }
+    }
+    return MaybeI32 { success: true, value: a / b, error_code: 0 }
+}
+
+static sink: i32 = 0
+
 entry {
-    -- call a function that returns Result
-    let result = load_data("level1.bin")
+    -- Constructing Results works
+    let r_ok  = always_ok()
+    let r_err = always_err()
 
-    -- handle both cases with match
-    match result {
-        .ok(data)  => {
-            -- use data
-            let _ = data
-        }
-        .err(e) => {
-            -- handle error
-            match e {
-                .file_not_found => {}
-                .bad_format     => {}
-                .out_of_memory  => {}
-            }
-        }
+    -- Returning Results from functions works
+    let loaded = load_data("level.bin")
+
+    -- Struct-based result handling (workaround for missing .ok/.err match)
+    let div = safe_divide(10, 2)
+    if div.success {
+        sink = div.value       -- 5
+    } else {
+        sink = -div.error_code
     }
 
-    -- early return on error pattern
-    let r2 = parse_int("123")
-    match r2 {
-        .err(e) => { let _ = e }
-        .ok(v)  => {
-            -- continue with v
-            let _ = v
-        }
-    }
+    -- Note: in future Pak versions, Result matching will work as:
+    -- match loaded {
+    --     .ok(v)  => { sink = v }
+    --     .err(e) => { sink = -1 }
+    -- }
 }

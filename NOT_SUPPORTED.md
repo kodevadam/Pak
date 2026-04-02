@@ -278,6 +278,89 @@ For debug output, use `debug.log(msg)` via `use n64.debug`.
 
 ---
 
+## Known Typechecker / Parser Limitations (Current Implementation)
+
+These are not design choices — they are current implementation gaps.
+Work around them as shown.
+
+### `let _ = expr` Does Not Work
+`_` is a keyword token, not a valid identifier in `let`.
+```
+-- WRONG (parse error):
+let _ = some_value
+
+-- CORRECT: just use the value directly, or assign to a named variable
+some_global = some_value
+```
+
+### Variant Payload Binding in Match Is Not Typechecked
+Parsing `.case(x) => { use x }` succeeds, but the bound name `x` is not
+tracked by the typechecker, causing E010 (unknown name).
+```
+-- COMPILES but typechecker rejects the binding variable:
+match shape {
+    .circle(r) => { return r * r * 3.14 }  -- 'r' unknown to typechecker
+}
+
+-- WORKAROUND: dispatch only, store data in structs
+match shape {
+    .circle => { return self.radius * self.radius * 3.14 }
+}
+```
+
+### `.ok(val)` and `.err(e)` Cannot Be Used as Match Patterns
+`ok` and `err` are reserved keywords. The pattern parser only accepts
+identifiers, so `.ok(val)` fails with E002.
+```
+-- WRONG (parse error E002):
+match result {
+    .ok(v)  => { use(v) }
+    .err(e) => { handle(e) }
+}
+
+-- WORKAROUND: use a struct with a success flag, or restructure
+-- to avoid branching on Result in the current implementation
+```
+
+### Keyword Names Cannot Be Used as Variant Cases
+Do not name variant cases after keywords: `none`, `ok`, `err`, `true`,
+`false`, `undefined`, etc. They will fail in match patterns.
+```
+-- WRONG:
+variant Foo { none, ok, err }
+
+-- CORRECT:
+variant Foo { empty, success, failure }
+```
+
+### DMA Checker False-Positives on Named Constants
+The DMA safety checker (E201/E202) fires on all arguments by name, including
+address and size arguments that are not buffers. Use inline literals for
+`rom_addr` and `size` arguments to avoid false positives.
+```
+-- WRONG (checker fires on DATA_SIZE and ROM_ADDR constants):
+dma.read(&buf[0], ROM_ADDR, DATA_SIZE)
+
+-- CORRECT: use inline literals
+dma.read(&buf[0], 0x10040000, 4096)
+```
+
+### Writing Through `alloc`'d Pointer Then `free` May Fail
+The move tracker can consider a pointer consumed after a deref-write,
+making `free(ptr)` fail with E010. Keep alloc/free patterns simple.
+```
+-- MAY FAIL:
+let p: *mut i32 = alloc(i32)
+*p = 42         -- deref-write may move p in tracker
+free(p)         -- E010: unknown name 'p'
+
+-- SAFE:
+let p: *mut u8 = alloc(u8, 64)
+free(p)         -- no intermediate deref-write
+```
+
+---
+
 ## Things That Look Plausible But Are Wrong
 
 | What you might write       | Why it's wrong                         | What to write instead             |

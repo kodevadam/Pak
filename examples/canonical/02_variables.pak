@@ -30,9 +30,11 @@ entry {
     -- static update
     frame_count += 1
 
-    -- unused: suppress by just referencing
-    let _ = alive
-    let _ = name
-    let _ = score
-    let _ = ratio
+    -- variables are mutable by default; no warnings for unused in Pak
+    x = MAX_HEALTH
+    y = SPEED
+    alive = false
+    score = frame_count
+    ratio = ratio + 1.0
+    name = "done"
 }
