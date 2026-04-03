@@ -1,0 +1,112 @@
+name: Pak Test Suite
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Pak compiler
+        run: pip install -e ".[dev]"
+
+      - name: Verify pak CLI is available
+        run: pak --version
+
+      # ── Correctness ──────────────────────────────────────────────────────────
+
+      - name: Run unit + integration tests
+        run: pytest tests/ -v --tb=short
+
+      # ── Canonical examples ────────────────────────────────────────────────────
+
+      - name: Verify all canonical examples pass pak check
+        run: |
+          failed=0
+          for f in examples/canonical/*.pak; do
+            if ! pak check "$f" > /dev/null 2>&1; then
+              echo "FAIL: $f"
+              pak check "$f"
+              failed=1
+            fi
+          done
+          [ "$failed" -eq 0 ] && echo "All canonical examples passed."
+          exit $failed
+
+      - name: Verify all invalid test examples fail pak check
+        run: |
+          failed=0
+          for f in tests/invalid/*.pak; do
+            if pak check "$f" > /dev/null 2>&1; then
+              echo "FAIL (should have failed): $f"
+              failed=1
+            fi
+          done
+          [ "$failed" -eq 0 ] && echo "All invalid examples correctly failed."
+          exit $failed
+
+      # ── Golden snapshots ─────────────────────────────────────────────────────
+
+      - name: Check pak explain snapshots are up to date
+        run: |
+          failed=0
+          for f in examples/canonical/*.pak; do
+            name=$(basename "$f" .pak)
+            snapshot="tests/snapshots/${name}.c"
+            if [ ! -f "$snapshot" ]; then
+              echo "MISSING SNAPSHOT: $snapshot"
+              failed=1
+              continue
+            fi
+            actual=$(pak explain "$f" 2>/dev/null)
+            expected=$(cat "$snapshot")
+            if [ "$actual" != "$expected" ]; then
+              echo "SNAPSHOT DRIFT: $f"
+              diff <(echo "$expected") <(echo "$actual") | head -20
+              failed=1
+            fi
+          done
+          [ "$failed" -eq 0 ] && echo "All snapshots match."
+          exit $failed
+
+      # ── Style / lint ──────────────────────────────────────────────────────────
+
+      - name: Check for Python syntax errors in tools/
+        run: python3 -m py_compile tools/pak_hook.py
+
+      - name: Verify validate_pak.sh is executable
+        run: test -x tools/validate_pak.sh || chmod +x tools/validate_pak.sh
+
+  # ── Summary badge job ───────────────────────────────────────────────────────
+
+  summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    steps:
+      - name: Report
+        run: |
+          if [ "${{ needs.test.result }}" = "success" ]; then
+            echo "✓ All tests passed."
+          else
+            echo "✗ One or more tests failed."
+            exit 1
+          fi

@@ -198,19 +198,23 @@ but this is handled by the runtime, not by Pak syntax.
 ### No Operator Overloading
 You cannot define custom `+`, `*`, etc. for user types.
 
-### No Pattern Matching on Integers
+### Integer Pattern Matching — Supported but Limited
+Integer literals are accepted as match arm patterns, but the match is not
+exhaustiveness-checked (unlike enum/variant match). Use if/elif chains if you
+want clarity; use match if the literal pattern reads better.
 ```
--- WRONG:
+-- WORKS (but not exhaustiveness-checked):
 match x {
-    0 => { ... }
-    1 => { ... }
+    0 => { }
+    1 => { }
+    _ => { }  -- wildcard recommended to silence ambiguity
 }
 
--- CORRECT: use if/elif chains for integer branching
-if x == 0 { ... }
-elif x == 1 { ... }
+-- ALSO FINE for integer branching:
+if x == 0 { }
+elif x == 1 { }
 ```
-Match is for enums and variants, not integers.
+Range patterns (`0..10 =>`) are not supported — see below.
 
 ### No Range Patterns in Match
 ```

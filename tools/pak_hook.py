@@ -25,9 +25,38 @@ Environment variables:
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+# Marker that separates the standard runtime preamble from user-defined code.
+# The preamble ends after the pak_arena_reset inline definition.
+_PREAMBLE_END_RE = re.compile(r"pak_arena_reset[^\n]*\n")
+
+
+def _extract_user_code(c_source: str) -> str:
+    """Strip the standard Pak runtime preamble from generated C output.
+
+    Returns only the user-defined types, functions, and entry point.
+    This makes the hook output readable without scrolling through 20 lines
+    of boilerplate on every file save.
+    """
+    m = _PREAMBLE_END_RE.search(c_source)
+    if m:
+        return c_source[m.end():]
+    # Fallback: if marker not found, return everything after the first blank
+    # line following the #include block
+    lines = c_source.splitlines(keepends=True)
+    in_includes = True
+    for i, line in enumerate(lines):
+        if in_includes and line.startswith("#include"):
+            continue
+        if in_includes and not line.startswith("#"):
+            in_includes = False
+        if not in_includes and line.strip() == "":
+            return "".join(lines[i + 1:])
+    return c_source
 
 
 def main():
@@ -95,14 +124,16 @@ def main():
         sys.exit(0)
 
     if explain.returncode == 0 and explain.stdout.strip():
-        print("=" * 60)
-        print(f"PAK EXPLAIN: {path}")
-        print("=" * 60)
-        print(explain.stdout.strip())
-        print("=" * 60)
-        print("Review the generated C above. If it does not match your intent,")
-        print("fix the Pak source — the file passed pak check but may be semantically wrong.")
-        print("=" * 60)
+        user_code = _extract_user_code(explain.stdout)
+        if user_code.strip():
+            print("=" * 60)
+            print(f"PAK EXPLAIN (user code): {path}")
+            print("=" * 60)
+            print(user_code.strip())
+            print("=" * 60)
+            print("Generated C above is your code only (preamble omitted).")
+            print("If the output does not match intent, fix the .pak source.")
+            print("=" * 60)
 
     sys.exit(0)
 
