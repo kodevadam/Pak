@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-DATASET_PATH = REPO_ROOT / "ai" / "dataset" / "seed_dataset.jsonl"
+DATASET_PATH = REPO_ROOT / "ai" / "dataset" / "full_dataset.jsonl"
 OUTPUT_DIR = REPO_ROOT / "ai" / "model_output"
 
 # -- System prompt baked into training format --
