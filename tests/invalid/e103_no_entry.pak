@@ -1,0 +1,7 @@
+-- EXPECT: E103
+-- A program with functions but no entry block fails with E103.
+-- Every executable Pak program needs exactly one 'entry { }' block.
+
+fn do_something() -> i32 {
+    return 42
+}

@@ -119,6 +119,18 @@ class Parser:
             decl = self.parse_trait(annotations)
         elif tok.type == TT.UNION:
             decl = self.parse_union(annotations)
+        elif tok.type == TT.COMPTIME:
+            self.advance()
+            self.expect(TT.IF)
+            self.expect(TT.LPAREN)
+            cond = self.parse_expr()
+            self.expect(TT.RPAREN)
+            then = self._parse_decl_block()
+            else_b = None
+            if self.match(TT.ELSE):
+                else_b = self._parse_decl_block()
+            decl = ast.ComptimeIf(condition=cond, then=then, else_branch=else_b,
+                                  line=line, col=col)
         else:
             raise ParseError(f'Unexpected token at top level', tok)
 
@@ -133,6 +145,20 @@ class Parser:
             decl = ast.CfgBlock(feature=feature, negated=negated, decl=decl,
                                  line=line, col=col)
         return decl
+
+    def _parse_decl_block(self):
+        """Parse { decl* } where decls are top-level declarations, returning a Block."""
+        line, col = self.loc()
+        self.expect(TT.LBRACE)
+        decls = []
+        while not self.check(TT.RBRACE) and not self.check(TT.EOF):
+            while self.match(TT.SEMICOLON):
+                pass
+            if self.check(TT.RBRACE) or self.check(TT.EOF):
+                break
+            decls.append(self.parse_top_level())
+        self.expect(TT.RBRACE)
+        return ast.Block(stmts=decls, line=line, col=col)
 
     def _parse_generic_params(self) -> List[str]:
         """Parse optional <T, U, V> generic parameter list after a name."""
@@ -418,7 +444,8 @@ class Parser:
                 ftype = self.parse_type()
                 fields.append(ast.StructField(name=fname, type=ftype,
                                               annotations=ann, line=line, col=col))
-            self.match(TT.COMMA)
+            if not self.match(TT.COMMA):
+                self.match(TT.SEMICOLON)
         self.expect(TT.RBRACE)
         return ast.UnionDecl(name=name, fields=fields,
                              annotations=annotations or [], line=line, col=col)
@@ -872,7 +899,7 @@ class Parser:
         # .variant or _ or literal or ident
         if self.check(TT.DOT):
             self.advance()
-            name = self.expect(TT.IDENT).value
+            name = self.expect_name().value   # accept keywords: .ok, .err, .none, etc.
             # .CaseName(binding, ...) — variant destructuring
             if self.check(TT.LPAREN):
                 self.advance()

@@ -1,0 +1,6 @@
+-- EXPECT: E010
+-- Using a variable that was never declared is an error.
+
+entry {
+    let x: i32 = undefined_var + 1
+}

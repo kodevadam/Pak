@@ -1,0 +1,10 @@
+-- EXPECT: E401
+-- Assigning a pointer variable to a new binding moves it.
+-- Using the original after the move is E401.
+
+entry {
+    let x: i32 = 10
+    let p: *i32 = &x
+    let q: *i32 = p    -- p is moved here (pointer reassignment = move)
+    let val: i32 = *p  -- E401: p has been moved to q
+}

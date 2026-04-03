@@ -1,0 +1,8 @@
+-- EXPECT: E002
+-- Pak has no 'if let' — that is Rust syntax.
+-- Conditional variable binding must use 'match' instead.
+
+entry {
+    let x: i32 = 5
+    if let y = x { }
+}
