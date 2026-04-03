@@ -158,7 +158,7 @@ section "Pytest Suite"
 FULL_PYTEST=0
 for arg in "$@"; do [ "$arg" = "--full" ] && FULL_PYTEST=1; done
 
-CORE_TESTS="tests/test_fixes.py tests/test_checker.py tests/test_canonical.py tests/test_invalid.py tests/test_snapshots.py"
+CORE_TESTS="tests/test_fixes.py tests/test_checker.py tests/test_canonical.py tests/test_invalid.py tests/test_snapshots.py tests/test_mutation.py tests/test_not_supported.py tests/test_api_patterns.py"
 
 set +e
 if [ "$FULL_PYTEST" -eq 1 ]; then

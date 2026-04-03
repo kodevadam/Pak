@@ -84,11 +84,35 @@ use n64.display
 | `display.show` | `(surface: *surface_t)` | Show/flip a surface to screen |
 | `display.close` | `()` | Shut down display |
 
-Common constants (declare as `extern const` or use raw values):
-- Resolution: `RESOLUTION_320x240`, `RESOLUTION_256x240`, `RESOLUTION_640x480`
-- Depth: `DEPTH_16_BPP`, `DEPTH_32_BPP`
-- Gamma: `GAMMA_NONE`
-- Filters: `FILTERS_RESAMPLE`, `FILTERS_DISABLED`
+These constants are C macros from libdragon. Use their numeric values directly,
+or declare them with `extern const`:
+
+```pak
+-- Option A: declare as extern const (verbose but self-documenting)
+extern const RESOLUTION_320x240: u32
+extern const DEPTH_16_BPP:       u32
+extern const GAMMA_NONE:         u32
+extern const FILTERS_RESAMPLE:   u32
+
+-- Option B: use raw values (preferred in canonical examples)
+-- resolution: 0=320x240, 1=640x480, 2=256x240, 3=512x240
+-- bit_depth:  2=16 bpp, 4=32 bpp
+-- gamma:      0=none, 1=correct, 3=correct+dither
+-- filters:    0=disabled, 1=resample, 3=resample+antialias
+```
+
+**Typical call — use raw values:**
+```pak
+-- 320×240, 16 bpp, triple-buffered, no gamma, bilinear resample
+display.init(0, 2, 3, 0, 1)
+```
+
+**Behavioral rules:**
+- Must be called before `rdpq.init()` or any `rdpq.*` calls.
+- `display.get()` blocks until a framebuffer is free — call at render start.
+- Prefer `rdpq.detach_show()` over separate `rdpq.detach()` + `display.show(fb)`.
+- Do NOT write to a surface after calling `rdpq.detach_show()`.
+- See `N64_HARDWARE.md` → Display System for resolution constants and arg table.
 
 ---
 
@@ -103,6 +127,10 @@ use n64.controller
 | `controller.init` | `()` | Initialize joypad subsystem |
 | `controller.poll` | `()` | Poll joypad state (call once per frame) |
 | `controller.read` | `(port: i32) -> joypad_status_t` | Read current state for port 0–3 |
+
+**CRITICAL: call `controller.poll()` before `controller.read()` every frame.**
+Reading without polling returns stale data from the previous frame.
+`port` is 0–3 (player 1 = port 0).
 
 The returned `joypad_status_t` struct has fields:
 ```pak
@@ -153,6 +181,29 @@ use n64.rdpq
 | `rdpq.sync_tile` | `()` | Sync RDP tile state |
 | `rdpq.sync_load` | `()` | Sync RDP texture load |
 
+**Behavioral rules:**
+- Call `rdpq.init()` after `display.init()` but before any draw calls.
+- Set a rendering mode before draw calls. Never draw without setting a mode first.
+- **Mode switching**: call `rdpq.sync_pipe()` between `set_mode_fill` and `set_mode_copy`.
+- `rdpq.set_mode_copy()` = fastest 2D; no alpha blend, no scale. Use for sprites.
+- `rdpq.set_mode_fill(color)` = fast solid fill. `color` is 32-bit RGBA: `0xRRGGBBAA`.
+- `rdpq.set_mode_standard()` = enables texture, alpha, blending — slowest mode.
+- `rdpq.attach_clear(fb)` = attach + clear to black in one call (preferred over `attach`).
+- `rdpq.detach_show()` = detach + flip in one call (preferred over `detach` + `display.show`).
+- Common RGBA constants: `0x000000FF` (black), `0xFFFFFFFF` (white), `0xFF0000FF` (red).
+
+**Per-frame render pattern:**
+```pak
+let fb = display.get()
+rdpq.attach_clear(fb)
+rdpq.set_mode_fill(0x000000FF)
+rdpq.fill_rectangle(0, 0, 320, 240)  -- clear to black
+rdpq.sync_pipe()
+rdpq.set_mode_copy()
+sprite.blit(my_sprite, x, y, 0)
+rdpq.detach_show()
+```
+
 ---
 
 ### `n64.sprite` — 2D Sprite Rendering
@@ -165,6 +216,13 @@ use n64.sprite
 |----------|-----------|-------------|
 | `sprite.load` | `(path: *c_char) -> *sprite_t` | Load a sprite from filesystem |
 | `sprite.blit` | `(sprite: *sprite_t, x: i32, y: i32, flags: u32)` | Draw sprite at (x, y) |
+
+**Behavioral rules:**
+- Call `rdpq.set_mode_copy()` before `sprite.blit` — blit requires copy mode.
+- `sprite` is a handle from `asset` declaration or `sprite.load()`. Pass directly by name.
+- `flags` is usually `0` for normal blitting.
+- `x`, `y` are top-left pixel coordinates on screen.
+- Asset sprites (`asset name: Sprite from "path"`) are loaded at startup automatically.
 
 ---
 
@@ -193,6 +251,14 @@ use n64.audio
 | `audio.init` | `(frequency: i32, buffers: i32)` | Initialize audio |
 | `audio.close` | `()` | Shut down audio |
 | `audio.get_buffer` | `() -> *i16` | Get pointer to audio output buffer |
+
+**Behavioral rules:**
+- `frequency`: use `22050`, `32000`, or `44100` (Hz). `44100` = CD quality.
+- `buffers`: `2`–`8`. More buffers = less crackling, higher latency. `4` is a good default.
+- `audio.get_buffer()` returns `none` if no buffer is ready — always check before writing.
+- Buffer is interleaved stereo `i16` samples: `[Left, Right, Left, Right, ...]`.
+- Fill the entire buffer each call; partial fills cause crackling.
+- See `N64_HARDWARE.md` → Audio System for buffer size calculation.
 
 ---
 
@@ -225,9 +291,19 @@ use n64.dma
 | `dma.write` | `(src: *u8, dst: u32, len: u32)` | DMA from RAM to peripheral |
 | `dma.wait` | `()` | Wait for DMA to complete |
 
+**Required sequence — copy exactly:**
+```pak
+cache.writeback(&buf[0], len)    -- 1. flush cache to RAM
+dma.read(&buf[0], rom_addr, len) -- 2. ROM → RAM via PI DMA
+dma.wait()                       -- 3. wait for PI DMA completion
+cache.invalidate(&buf[0], len)   -- 4. invalidate so CPU reads fresh data
+```
+
 **Safety requirements (enforced by typechecker):**
-- `dst` must be `@aligned(16)` (E202)
-- `cache.writeback(dst, len)` must be called before DMA write (E201)
+- `dst` must be `@aligned(16)` (E202 if missing)
+- `cache.writeback` must precede DMA (E201 if missing)
+- `rom_addr`: cartridge ROM address, e.g. `0x10040000` (after 256-byte header)
+- See `N64_HARDWARE.md` → DMA for full explanation of why each step is needed.
 
 ---
 
@@ -257,6 +333,15 @@ use n64.eeprom
 | `eeprom.type_detect` | `() -> i32` | Detect EEPROM type |
 | `eeprom.read` | `(block: i32, dst: *u8) -> i32` | Read EEPROM block |
 | `eeprom.write` | `(block: i32, src: *u8) -> i32` | Write EEPROM block |
+
+**Behavioral rules:**
+- **Always call `eeprom.present()` first** — most cartridges have no EEPROM.
+- Each block = exactly **8 bytes**. `dst` and `src` must point to at least 8 bytes.
+- EEPROM 4K = 64 blocks (512 bytes total). EEPROM 16K = 256 blocks (2048 bytes total).
+- `eeprom.type_detect()` returns: `0` = none, `1` = 4K, `2` = 16K.
+- Writes are slow (~15 ms/block) — only write when save data changes.
+- Return value: `0` = success, non-zero = error.
+- See `N64_HARDWARE.md` → EEPROM for complete save/load pattern.
 
 ---
 

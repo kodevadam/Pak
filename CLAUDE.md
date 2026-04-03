@@ -59,10 +59,22 @@ Read these files **in order** before writing or modifying `.pak` files:
 1. **`LANGUAGE.md`** — the canonical syntax reference. Every construct you write must appear here.
 2. **`NOT_SUPPORTED.md`** — hard list of things Pak does not have. If something is on this list, do not use it.
 3. **`STDLIB.md`** — all builtin functions and N64 API modules. Do not invent function signatures.
-4. **`examples/canonical/`** — small, correct reference examples. Prefer patterns shown here.
+4. **`N64_HARDWARE.md`** — N64 hardware facts: correct arg values for `display.init`, required call sequences, DMA constraints, controller polling rules, EEPROM block size, audio buffer format, initialization order. **Read this before calling any N64 API.**
+5. **`IDIOMS.md`** — canonical patterns for game loop, DMA, audio, EEPROM, fixed-point, etc.
+6. **`examples/canonical/`** — 22 verified reference examples. Prefer patterns shown here.
 
 If a language feature is not documented in `LANGUAGE.md` and not demonstrated
 in `examples/canonical/`, do not use it. State uncertainty instead of guessing.
+
+**Key behavioral rules from N64_HARDWARE.md (memorize these):**
+- `display.init(0, 2, 3, 0, 1)` — 320×240, 16bpp, triple-buffer, no gamma, bilinear resample
+- Call `controller.poll()` **every frame before** `controller.read()`
+- DMA sequence: `cache.writeback` → `dma.read` → `dma.wait` → `cache.invalidate`
+- DMA buffer **must** be `@aligned(16)` or E202 fires
+- `rdpq.sync_pipe()` required between mode switches in the same frame
+- `audio.get_buffer()` returns `none` if not ready — always check
+- Always check `eeprom.present()` before any EEPROM operation
+- Each EEPROM block = exactly 8 bytes
 
 ---
 

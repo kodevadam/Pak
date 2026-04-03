@@ -17,7 +17,9 @@ use n64.timer
 
 entry {
     -- 1. Initialize subsystems
-    display.init(RESOLUTION_320x240, DEPTH_16_BPP, 3, GAMMA_NONE, FILTERS_RESAMPLE)
+    -- display.init(resolution, bit_depth, num_buffers, gamma, filters)
+    -- 0=320x240, 2=16bpp, 3=triple-buffer, 0=no gamma, 1=bilinear resample
+    display.init(0, 2, 3, 0, 1)
     controller.init()
     rdpq.init()
     timer.init()
@@ -399,3 +401,172 @@ struct Vertex { x: f32, y: f32, z: f32, u: f32, v: f32 }
 @cfg(DEBUG)
 fn dump_state(gs: *GameState) { debug.log("state dump") }
 ```
+
+---
+
+## 14. Audio Buffer Fill Pattern
+
+Call audio fill once per frame in your game loop.
+
+```pak
+use n64.audio
+
+-- Called once at startup
+audio.init(44100, 4)    -- 44100 Hz, 4 buffers
+
+-- Called in game loop:
+fn fill_audio() {
+    let buf: *i16 = audio.get_buffer()
+    if buf == none { return }    -- buffer not ready yet; skip
+
+    -- buf is interleaved stereo: [L0, R0, L1, R1, ...]
+    -- At 44100 Hz / 60 fps ≈ 735 stereo pairs = 1470 i16 values
+    let i: i32 = 0
+    loop {
+        if i >= 1470 { break }
+        buf[i]     = generate_left_sample(i / 2)   -- left
+        buf[i + 1] = generate_right_sample(i / 2)  -- right
+        i = i + 2
+    }
+}
+```
+
+Rules:
+- `audio.get_buffer()` returns `none` if the hardware isn't ready — always check.
+- Buffer is always **interleaved stereo** even for mono games (duplicate L→R).
+- Silence is `0` for both channels.
+- Never write past the buffer end — know the sample count from frequency / framerate.
+
+---
+
+## 15. EEPROM Save / Load
+
+Always check presence before any EEPROM operation.
+
+```pak
+use n64.eeprom
+
+-- Data layout: must fit in multiples of 8 bytes (one EEPROM block = 8 bytes)
+const SAVE_MAGIC: u32 = 0xPAK10001   -- unique ID to detect valid saves
+const SAVE_BLOCK: i32 = 0            -- which EEPROM block to use (0-indexed)
+
+@aligned(8)
+static save_raw: [8]u8 = undefined   -- one EEPROM block
+
+fn save(score: i32) {
+    if not eeprom.present() { return }
+    -- Pack magic (4 bytes) + score (4 bytes) into 8-byte block
+    save_raw[0] = (SAVE_MAGIC >> 24) as u8
+    save_raw[1] = (SAVE_MAGIC >> 16) as u8
+    save_raw[2] = (SAVE_MAGIC >> 8)  as u8
+    save_raw[3] =  SAVE_MAGIC        as u8
+    save_raw[4] = (score >> 24) as u8
+    save_raw[5] = (score >> 16) as u8
+    save_raw[6] = (score >> 8)  as u8
+    save_raw[7] =  score        as u8
+    eeprom.write(SAVE_BLOCK, &save_raw[0])
+}
+
+fn load() -> i32 {
+    if not eeprom.present() { return 0 }
+    eeprom.read(SAVE_BLOCK, &save_raw[0])
+    let magic: u32 = (save_raw[0] as u32 << 24)
+                   | (save_raw[1] as u32 << 16)
+                   | (save_raw[2] as u32 << 8)
+                   |  save_raw[3] as u32
+    if magic != SAVE_MAGIC { return 0 }   -- no valid save
+    return (save_raw[4] as i32 << 24)
+         | (save_raw[5] as i32 << 16)
+         | (save_raw[6] as i32 << 8)
+         |  save_raw[7] as i32
+}
+```
+
+---
+
+## 16. RDP Fill → Sprite Render (Mode Switch)
+
+Switch modes mid-frame requires a pipeline sync.
+
+```pak
+use n64.display
+use n64.rdpq
+use n64.sprite
+
+asset player: Sprite from "sprites/player.png"
+asset bg: Sprite from "sprites/bg.png"
+
+fn render(player_x: i32, player_y: i32) {
+    let fb = display.get()
+    rdpq.attach_clear(fb)
+
+    -- Fill background with solid color
+    rdpq.set_mode_fill(0x1A1A2EFF)            -- dark blue background
+    rdpq.fill_rectangle(0, 0, 320, 240)
+
+    -- Switch to copy mode for sprites (sync required)
+    rdpq.sync_pipe()
+    rdpq.set_mode_copy()
+
+    sprite.blit(bg, 0, 0, 0)                  -- background sprite
+    sprite.blit(player, player_x, player_y, 0) -- player sprite
+
+    rdpq.detach_show()
+}
+```
+
+Rules:
+- Always `rdpq.sync_pipe()` between mode changes within a frame.
+- `rdpq.set_mode_copy()` must be active before any `sprite.blit()` call.
+- Coordinates are screen pixels; (0,0) = top-left.
+- Call `rdpq.detach_show()` exactly once per frame at the end.
+
+---
+
+## 17. Rumble Pattern
+
+```pak
+use n64.controller
+use n64.rumble
+
+rumble.init()           -- after controller.init(), once at startup
+
+-- In game event handler:
+fn on_player_hit() {
+    rumble.start(0)     -- port 0 = player 1
+}
+
+fn on_hit_resolved() {
+    rumble.stop(0)
+}
+```
+
+Rules:
+- Call `rumble.init()` after `controller.init()`.
+- `port` is 0–3 matching `controller.read(port)`.
+- Rumble Pak is not always present — in production code check with `cpak` APIs.
+
+---
+
+## 18. Frame Rate and Timing
+
+```pak
+use n64.timer
+
+timer.init()    -- once at startup
+
+-- In game loop:
+let dt: f32 = timer.delta()   -- seconds since last call (e.g. 0.0167 at 60 fps)
+
+-- Convert to fix16.16 for physics:
+let dt_fixed: fix16.16 = dt as fix16.16
+
+-- Cap dt to avoid spiral of death on lag frames:
+-- (use a static to accumulate, or cap dt to 1/30s maximum)
+```
+
+Rules:
+- `timer.delta()` returns `f32` seconds. At 60 fps ≈ `0.01667`.
+- First call after `timer.init()` may return a large value — ignore it or cap.
+- For physics, convert to `fix16.16` for speed.
+- Cap delta: if `dt > 0.05` { `dt = 0.05` } prevents spiral of death on lag frames.
