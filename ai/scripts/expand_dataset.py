@@ -32,6 +32,11 @@ from generators.hardware import gen_hardware
 from generators.api_combos import gen_api_combos
 from generators.game_examples import gen_game_examples
 from generators.patterns import gen_patterns
+from generators.libdragon_deep import gen_libdragon_deep
+from generators.libdragon_audio import gen_libdragon_audio
+from generators.t3d_deep import gen_t3d_deep
+from generators.n64_c_patterns import gen_n64_c_patterns
+from generators.complex_architecture import gen_complex_architecture
 
 REPO_ROOT = SCRIPTS_DIR.parent.parent
 DATASET_DIR = REPO_ROOT / "ai" / "dataset"
@@ -85,6 +90,11 @@ def main():
         ("API Usage Combos", gen_api_combos),
         ("Game Examples (.pak files)", gen_game_examples),
         ("Game Dev Patterns", gen_patterns),
+        ("Libdragon Deep (rdpq, sprites, FS, save)", gen_libdragon_deep),
+        ("Libdragon Audio (mixer, wav64, xm64)", gen_libdragon_audio),
+        ("Tiny3D Deep (pipeline, animation, math)", gen_t3d_deep),
+        ("N64 C Patterns (extern, transpilation)", gen_n64_c_patterns),
+        ("Complex Architecture (AI, physics, inventory)", gen_complex_architecture),
     ]
 
     for name, gen_fn in generators:
