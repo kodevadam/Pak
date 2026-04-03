@@ -37,6 +37,10 @@ from generators.libdragon_audio import gen_libdragon_audio
 from generators.t3d_deep import gen_t3d_deep
 from generators.n64_c_patterns import gen_n64_c_patterns
 from generators.complex_architecture import gen_complex_architecture
+from generators.performance_optimization import gen_performance_optimization
+from generators.advanced_architecture import gen_advanced_architecture
+from generators.troubleshooting import gen_troubleshooting
+from generators.integrated_games import gen_integrated_games
 
 REPO_ROOT = SCRIPTS_DIR.parent.parent
 DATASET_DIR = REPO_ROOT / "ai" / "dataset"
@@ -95,6 +99,10 @@ def main():
         ("Tiny3D Deep (pipeline, animation, math)", gen_t3d_deep),
         ("N64 C Patterns (extern, transpilation)", gen_n64_c_patterns),
         ("Complex Architecture (AI, physics, inventory)", gen_complex_architecture),
+        ("Performance Optimization (RAM, TMEM, FPS)", gen_performance_optimization),
+        ("Advanced Architecture (state machines, events)", gen_advanced_architecture),
+        ("Troubleshooting (bugs, glitches, crashes)", gen_troubleshooting),
+        ("Integrated Multi-System Examples", gen_integrated_games),
     ]
 
     for name, gen_fn in generators:
