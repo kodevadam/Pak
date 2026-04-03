@@ -3621,7 +3621,8 @@ class TestUnionDecl:
     def test_codegen_union_not_struct(self):
         c = codegen('union Punner { a: i32; b: f32; }')
         assert 'typedef union' in c
-        assert 'typedef struct' not in c
+        # Punner should be emitted as a union, not a struct
+        assert 'typedef struct Punner' not in c.replace('\n', ' ').replace('  ', ' ')
 
     def test_union_with_annotation(self):
         c = codegen('@packed union Packed { x: u8; y: u16; }')

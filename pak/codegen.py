@@ -1996,6 +1996,24 @@ class Codegen:
             return self.gen_cfg_block(decl)
         if isinstance(decl, ast.UnionDecl):
             return self.gen_union(decl)
+        if isinstance(decl, ast.ComptimeIf):
+            cond = self.gen_expr(decl.condition)
+            then_lines = []
+            for s in decl.then.stmts:
+                r = self.gen_decl(s)
+                if r:
+                    then_lines.append(r)
+            then_body = '\n'.join(then_lines)
+            result = f'#if {cond}\n{then_body}'
+            if decl.else_branch:
+                else_lines = []
+                for s in decl.else_branch.stmts:
+                    r = self.gen_decl(s)
+                    if r:
+                        else_lines.append(r)
+                result += f'\n#else\n' + '\n'.join(else_lines)
+            result += f'\n#endif'
+            return result
         return f'/* unhandled decl: {type(decl).__name__} */'
 
     def gen_impl(self, impl: ast.ImplBlock) -> str:
